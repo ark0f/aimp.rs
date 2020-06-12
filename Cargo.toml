@@ -1,0 +1,14 @@
+[package]
+name = "aimp"
+version = "0.1.0"
+authors = ["Arsenii Lyashenko <arsenylyashenko.3@gmail.com>"]
+edition = "2018"
+
+[workspace]
+members = [
+    "aimp-sys",
+    "aimp-sys/tests/check_dll_export"
+]
+
+[dependencies]
+sys = { path = "aimp-sys", package = "aimp-sys" }

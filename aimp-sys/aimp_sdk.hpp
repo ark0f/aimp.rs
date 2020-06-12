@@ -1,0 +1,26 @@
+#define _UNICODE
+#include <tchar.h>
+
+#include <apiActions.h>
+#include <apiAlbumArt.h>
+#include <apiCore.h>
+#include <apiDecoders.h>
+#include <apiFileManager.h>
+#include <apiGUI.h>
+#include <apiInternet.h>
+#include <apiLyrics.h>
+#include <apiMUI.h>
+#include <apiMenu.h>
+#include <apiMessages.h>
+#include <apiMusicLibrary.h>
+#include <apiObjects.h>
+#include <apiOptions.h>
+#include <apiPlayer.h>
+#include <apiPlaylists.h>
+#include <apiPlugin.h>
+#include <apiRemote.h>
+#include <apiScheduler.h>
+#include <apiSkins.h>
+#include <apiTagEditor.h>
+#include <apiThreading.h>
+#include <apiVisuals.h>
