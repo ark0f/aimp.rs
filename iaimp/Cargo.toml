@@ -1,0 +1,19 @@
+[package]
+name = "iaimp"
+version = "0.1.0"
+authors = ["Arsenii Lyashenko <arsenylyashenko.3@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+wchar = "0.6.0"
+winapi = { version = "0.3.8", features = ["windef", "wingdi", "oaidl", "basetsd"] }
+bitflags = "1.2.1"
+paste = "0.1.18"
+
+[build-dependencies]
+bindgen = "0.53"
+cc = "1.0.54"
+clang = { version = "0.23.0", features = ["runtime", "clang_6_0"] }
+quote = "1.0.7"
+proc-macro2 = "1.0.18"
+heck = "0.3.1"
