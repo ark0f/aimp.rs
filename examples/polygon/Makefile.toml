@@ -1,0 +1,52 @@
+[env]
+AIMP_PATH = "C:/Program Files (x86)/AIMP"
+
+[env.development]
+AIMP_RESTART = "true"
+TARGET_DIR = "debug"
+
+[env.production]
+AIMP_RESTART = "false"
+TARGET_DIR = "release"
+
+[tasks.build-development]
+condition = { profiles = ["development"] }
+command = "cargo"
+args = ["build"]
+
+[tasks.build-production]
+condition = { profiles = ["production"] }
+command = "cargo"
+args = ["build", "--release"]
+
+[tasks.pack]
+dependencies = ["build-development", "build-production"]
+script_runner = "powershell"
+script_extension = "ps1"
+script = [
+'''
+chcp 65001
+cd $env:CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY/target/$env:TARGET_DIR
+
+if ($env:AIMP_RESTART -eq "true") {
+    $nid = (Get-Process AIMP -ErrorAction SilentlyContinue).Id
+    if ($nid) {
+        Stop-Process -Id $nid
+        Wait-Process -Id $nid
+    }
+}
+
+rm -r $env:TEMP/$env:CARGO_MAKE_CRATE_FS_NAME
+mkdir $env:TEMP/$env:CARGO_MAKE_CRATE_FS_NAME
+
+cp "$env:CARGO_MAKE_CRATE_FS_NAME.dll" $env:TEMP/$env:CARGO_MAKE_CRATE_FS_NAME
+Compress-Archive $env:TEMP/$env:CARGO_MAKE_CRATE_FS_NAME "$env:CARGO_MAKE_CRATE_FS_NAME.zip" -Force
+
+rm -r $env:AIMP_PATH/Plugins/$env:CARGO_MAKE_CRATE_FS_NAME
+mkdir $env:AIMP_PATH/Plugins/$env:CARGO_MAKE_CRATE_FS_NAME
+
+if ($env:AIMP_RESTART -eq "true") {
+    start AIMP.exe
+}
+'''
+]

@@ -1,37 +1,28 @@
 use crate::{error::HresultExt, util::Static};
-use iaimp::IAIMPTaskPriorityVTable;
 use iaimp::{
-    com_wrapper, ComPtr, ComVTables, IAIMPServiceThreads, IAIMPTask, IAIMPTaskOwner,
-    IAIMPTaskPriority, IAIMPTaskVTable, IUnknown, ServiceThreadsFlags, TaskPriority,
+    com_wrapper, ComPtr, ComRc, IAIMPServiceThreads, IAIMPTask, IAIMPTaskOwner, IAIMPTaskPriority,
+    ServiceThreadsFlags, TaskPriority,
 };
-use std::future::Future;
-use std::mem::MaybeUninit;
-use std::num::NonZeroUsize;
-use std::rc::Rc;
-use winapi::_core::cell::RefCell;
-use winapi::_core::pin::Pin;
-use winapi::_core::task::{Context, Poll};
-use winapi::shared::winerror::E_FAIL;
+use std::{
+    cell::RefCell,
+    future::Future,
+    mem::MaybeUninit,
+    num::NonZeroUsize,
+    pin::Pin,
+    task::{Context, Poll},
+};
 use winapi::shared::{
     basetsd::DWORD_PTR,
-    winerror::{HRESULT, S_OK},
+    winerror::{E_FAIL, HRESULT, S_OK},
 };
 
-static mut SERVICE_THREADS: Static<ServiceThreads> = Static::new();
+pub(crate) static THREADS: Static<Threads> = Static::new();
 
-pub(crate) fn init(threads: ComPtr<dyn IAIMPServiceThreads>) {
-    unsafe { SERVICE_THREADS.init(ServiceThreads { inner: threads }) }
-}
-
-pub fn get() -> &'static ServiceThreads {
-    unsafe { SERVICE_THREADS.get() }
-}
-
-pub struct ServiceThreads {
+pub struct Threads {
     inner: ComPtr<dyn IAIMPServiceThreads>,
 }
 
-impl ServiceThreads {
+impl Threads {
     fn execute_in_main_thread<T>(&self, task: Task<T>, flags: ServiceThreadsFlags)
     where
         T: Future<Output = ()> + Send + 'static,
@@ -75,6 +66,12 @@ impl ServiceThreads {
     }
 }
 
+impl From<ComPtr<dyn IAIMPServiceThreads>> for Threads {
+    fn from(ptr: ComPtr<dyn IAIMPServiceThreads>) -> Self {
+        Self { inner: ptr }
+    }
+}
+
 pub struct Task<T> {
     fut: T,
     priority: TaskPriority,
@@ -108,7 +105,7 @@ where
 }
 
 pub struct TaskWrapper<T> {
-    inner: Rc<RefCell<Option<Task<T>>>>,
+    inner: RefCell<Option<Task<T>>>,
 }
 
 impl<T> TaskWrapper<T>
@@ -117,20 +114,15 @@ where
 {
     fn new(task: Task<T>) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(Some(task))),
+            inner: RefCell::new(Some(task)),
         }
     }
 
-    fn new_raw(task: Task<T>) -> ComPtr<dyn IAIMPTask> {
+    fn new_raw(task: Task<T>) -> ComRc<dyn IAIMPTask> {
         let wrapper = TaskWrapper::new(task);
-        let wrapper =
-            com_wrapper!(wrapper => TaskWrapper<Task<T>>: IAIMPTaskVTable, IAIMPTaskPriorityVTable);
-        unsafe { wrapper.into_com_ptr() }
+        let wrapper = com_wrapper!(wrapper => TaskWrapper<T>: dyn IAIMPTask, dyn IAIMPTaskPriority);
+        unsafe { wrapper.into_com_rc() }
     }
-}
-
-impl<T> ComVTables for TaskWrapper<T> {
-    type Pointers = (*mut IAIMPTaskVTable, *mut IAIMPTaskPriorityVTable);
 }
 
 impl<T> IAIMPTask for TaskWrapper<T>
@@ -172,7 +164,7 @@ pub struct TaskHandle(Option<NonZeroUsize>);
 impl TaskHandle {
     pub fn cancel(mut self) {
         unsafe {
-            SERVICE_THREADS
+            THREADS
                 .get()
                 .inner
                 .cancel(self.take(), ServiceThreadsFlags::NONE)
@@ -183,7 +175,7 @@ impl TaskHandle {
 
     pub fn cancel_and_wait(mut self) {
         unsafe {
-            SERVICE_THREADS
+            THREADS
                 .get()
                 .inner
                 .cancel(self.take(), ServiceThreadsFlags::WAIT_FOR)
@@ -194,7 +186,7 @@ impl TaskHandle {
 
     fn wait_by_ref(&mut self) {
         unsafe {
-            SERVICE_THREADS
+            THREADS
                 .get()
                 .inner
                 .wait_for(self.take())

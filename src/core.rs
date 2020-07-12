@@ -2,15 +2,7 @@ use crate::{error::HresultExt, util::Static, AimpString, Result};
 use iaimp::{ComInterface, ComPtr, ComRc, CorePath, IAIMPCore, IUnknown};
 use std::mem::MaybeUninit;
 
-static mut CORE: Static<Core> = Static::new();
-
-pub(crate) fn init(core: ComPtr<dyn IAIMPCore>) {
-    unsafe { CORE.init(Core(core)) }
-}
-
-pub fn get() -> &'static Core {
-    unsafe { CORE.get() }
-}
+pub static CORE: Static<Core> = Static::new();
 
 #[derive(Clone)]
 pub struct Core(ComPtr<dyn IAIMPCore>);
@@ -44,5 +36,11 @@ impl Core {
             let ptr = ptr.assume_init();
             ComPtr::from_ptr(ptr as _)
         }
+    }
+}
+
+impl From<ComPtr<dyn IAIMPCore>> for Core {
+    fn from(ptr: ComPtr<dyn IAIMPCore>) -> Self {
+        Self(ptr)
     }
 }

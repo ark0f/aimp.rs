@@ -1,21 +1,24 @@
 pub mod core;
 mod error;
+pub mod internet;
+pub mod stream;
 pub mod threading;
 mod util;
 mod wrapper;
 
-pub use crate::core::Core;
+pub use crate::core::{Core, CORE};
 pub use error::{Error, ErrorKind, Result};
 pub use iaimp::{CorePath, PluginCategory};
 
 use error::HresultExt;
-use iaimp::{ComRc, IAIMPErrorInfo, IAIMPString, StringCase};
+use iaimp::{
+    ComInterface, ComPtr, ComRc, IAIMPErrorInfo, IAIMPPropertyList, IAIMPString, StringCase, IID,
+};
 use std::{
     cmp::Ordering,
     error::Error as StdError,
     fmt,
     hash::{Hash, Hasher},
-    mem,
     mem::MaybeUninit,
     ops::{Add, AddAssign},
     os::raw::c_int,
@@ -25,12 +28,8 @@ use std::{
 
 #[doc(hidden)]
 pub mod macro_export {
-    pub use crate::util::message_box;
-    pub use crate::wrapper::Wrapper;
-    pub use iaimp::com_wrapper;
-    pub use iaimp::ComWrapper;
-    pub use iaimp::IAIMPPluginVTable;
-    pub use iaimp::IUnknown;
+    pub use crate::{util::message_box, wrapper::Wrapper};
+    pub use iaimp::{com_wrapper, ComWrapper, IAIMPPlugin, IUnknown};
     pub use winapi::shared::winerror::{HRESULT, S_OK};
 }
 
@@ -49,7 +48,7 @@ macro_rules! main {
 
             let wrapper = $crate::macro_export::com_wrapper!(
                 Wrapper::new() =>
-                Wrapper: $crate::macro_export::IAIMPPluginVTable
+                Wrapper: $crate::macro_export::IAIMPPlugin
             );
             *header = Box::into_raw(Box::new(wrapper)) as _;
 
@@ -63,7 +62,7 @@ pub trait Plugin: Sized {
 
     type Error: StdError;
 
-    fn new(core: Core) -> StdResult<Self, Self::Error>;
+    fn new() -> StdResult<Self, Self::Error>;
 
     fn finish(self) -> StdResult<(), Self::Error>;
 }
@@ -79,8 +78,11 @@ pub struct PluginInfo {
 pub struct AimpString(ComRc<dyn IAIMPString>);
 
 impl AimpString {
-    pub fn as_bytes_mut(&mut self) -> &mut [u16] {
-        unsafe { slice::from_raw_parts_mut(self.0.get_data(), self.0.get_length() as _) }
+    /// # Safety
+    ///
+    /// This method is unsafe because caller can make UTF-16 data invalid
+    pub unsafe fn as_bytes_mut(&mut self) -> &mut [u16] {
+        slice::from_raw_parts_mut(self.0.get_data(), self.0.get_length() as _)
     }
 
     pub fn as_bytes(&self) -> &[u16] {
@@ -158,7 +160,13 @@ impl AimpString {
 
 impl Default for AimpString {
     fn default() -> Self {
-        AimpString(core::get().create::<dyn IAIMPString>().unwrap())
+        Self(CORE.get().create::<dyn IAIMPString>().unwrap())
+    }
+}
+
+impl From<ComRc<dyn IAIMPString>> for AimpString {
+    fn from(rc: ComRc<dyn IAIMPString>) -> Self {
+        Self(rc)
     }
 }
 
@@ -180,12 +188,6 @@ impl From<String> for AimpString {
 impl AsRef<[u16]> for AimpString {
     fn as_ref(&self) -> &[u16] {
         self.as_bytes()
-    }
-}
-
-impl AsMut<[u16]> for AimpString {
-    fn as_mut(&mut self) -> &mut [u16] {
-        self.as_bytes_mut()
     }
 }
 
@@ -260,7 +262,7 @@ pub struct ErrorInfo(ComRc<dyn IAIMPErrorInfo>);
 
 impl Default for ErrorInfo {
     fn default() -> Self {
-        Self(core::get().create::<dyn IAIMPErrorInfo>().unwrap())
+        Self(CORE.get().create::<dyn IAIMPErrorInfo>().unwrap())
     }
 }
 
@@ -268,22 +270,18 @@ impl ErrorInfo {
     pub fn get(&self) -> ErrorInfoContent {
         unsafe {
             let mut code = MaybeUninit::uninit();
-            let mut short = MaybeUninit::uninit();
-            let mut full = MaybeUninit::uninit();
+            let mut msg = MaybeUninit::uninit();
+            let mut details = MaybeUninit::uninit();
 
             self.0
-                .get_info(code.as_mut_ptr(), short.as_mut_ptr(), full.as_mut_ptr())
+                .get_info(code.as_mut_ptr(), msg.as_mut_ptr(), details.as_mut_ptr())
                 .into_result()
                 .unwrap();
 
             ErrorInfoContent {
                 code: code.assume_init(),
-                short: AimpString(short.assume_init()),
-                full: if full.as_ptr().is_null() {
-                    None
-                } else {
-                    Some(AimpString(full.assume_init()))
-                },
+                msg: AimpString(msg.assume_init()),
+                details: details.assume_init().map(AimpString),
             }
         }
     }
@@ -292,8 +290,8 @@ impl ErrorInfo {
         unsafe {
             self.0.set_info(
                 content.code,
-                content.short.0,
-                mem::transmute(content.full.map(|s| s.0)),
+                content.msg.0,
+                content.details.map(|details| details.0),
             )
         }
     }
@@ -319,6 +317,106 @@ impl fmt::Display for ErrorInfo {
 #[derive(Debug)]
 pub struct ErrorInfoContent {
     pub code: i32,
-    pub short: AimpString,
-    pub full: Option<AimpString>,
+    pub msg: AimpString,
+    pub details: Option<AimpString>,
+}
+
+pub struct PropertyList(ComPtr<dyn IAIMPPropertyList>);
+
+impl PropertyList {
+    pub fn get<T: PropertyListAccessor>(&self, id: i32) -> T {
+        T::get(id, self)
+    }
+
+    pub fn update(&mut self) -> PropertyListGuard {
+        unsafe {
+            self.0.begin_update();
+        }
+        PropertyListGuard(self)
+    }
+}
+
+impl<T: ComInterface + IAIMPPropertyList + ?Sized> From<ComPtr<T>> for PropertyList {
+    fn from(ptr: ComPtr<T>) -> Self {
+        unsafe { Self(ptr.cast()) }
+    }
+}
+
+pub struct PropertyListGuard<'a>(&'a mut PropertyList);
+
+impl PropertyListGuard<'_> {
+    pub fn set<T: PropertyListAccessor>(self, id: i32, prop: T) -> Self {
+        prop.set(id, self.0);
+        self
+    }
+}
+
+impl Drop for PropertyListGuard<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            (self.0).0.end_update();
+        }
+    }
+}
+
+pub trait PropertyListAccessor: Sized {
+    fn get(id: i32, list: &PropertyList) -> Self;
+
+    fn set(self, id: i32, list: &mut PropertyList);
+}
+
+macro_rules! impl_prop_get_set {
+    ($prop:ty, $get:ident, $set:ident) => {
+        impl PropertyListAccessor for $prop {
+            fn get(id: i32, list: &PropertyList) -> Self {
+                unsafe {
+                    let mut value = MaybeUninit::uninit();
+                    (list.0).$get(id, value.as_mut_ptr()).into_result().unwrap();
+                    value.assume_init()
+                }
+            }
+
+            fn set(self, id: i32, list: &mut PropertyList) {
+                unsafe {
+                    (list.0).$set(id, self).into_result().unwrap();
+                }
+            }
+        }
+    };
+}
+
+impl_prop_get_set!(f64, get_value_as_float, set_value_as_float);
+impl_prop_get_set!(i32, get_value_as_int32, set_value_as_int32);
+impl_prop_get_set!(i64, get_value_as_int64, set_value_as_int64);
+
+impl<T: ComInterface + ?Sized> PropertyListAccessor for ComRc<T> {
+    fn get(id: i32, list: &PropertyList) -> Self {
+        unsafe {
+            let mut value = MaybeUninit::uninit();
+            list.0
+                .get_value_as_object(id, &T::IID as *const IID as *const _, value.as_mut_ptr())
+                .into_result()
+                .unwrap();
+            value.assume_init().cast()
+        }
+    }
+
+    fn set(self, id: i32, list: &mut PropertyList) {
+        unsafe {
+            list.0
+                .set_value_as_object(id, self.cast())
+                .into_result()
+                .unwrap();
+        }
+    }
+}
+
+impl PropertyListAccessor for AimpString {
+    fn get(id: i32, list: &PropertyList) -> Self {
+        Self(ComRc::<dyn IAIMPString>::get(id, list))
+    }
+
+    fn set(self, id: i32, list: &mut PropertyList) {
+        self.0.set(id, list)
+    }
 }

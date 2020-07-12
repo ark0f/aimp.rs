@@ -10,6 +10,12 @@ pub struct Error {
     kind: ErrorKind,
 }
 
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self { desc: None, kind }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if let Some(desc) = &self.desc {
@@ -24,13 +30,15 @@ impl error::Error for Error {}
 
 #[derive(Debug)]
 pub enum ErrorKind {
-    Aimp(io::Error),
+    Hresult(io::Error),
+    Unexpected,
 }
 
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ErrorKind::Aimp(err) => err.fmt(f),
+            ErrorKind::Hresult(err) => err.fmt(f),
+            ErrorKind::Unexpected => "unexpected".fmt(f),
         }
     }
 }
@@ -49,7 +57,7 @@ impl HresultExt for HRESULT {
             let err = io::Error::from_raw_os_error(self);
             Err(Error {
                 desc: None,
-                kind: ErrorKind::Aimp(err),
+                kind: ErrorKind::Hresult(err),
             })
         }
     }

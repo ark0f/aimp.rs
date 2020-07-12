@@ -1,4 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
+#![allow(clippy::too_many_arguments)]
 
 use bitflags::bitflags;
 use std::{
@@ -63,6 +64,10 @@ impl<T: ComInterface + ?Sized> ComPtr<T> {
             inner: NonNull::new(ptr).expect("Pointer is not null"),
         }
     }
+
+    pub unsafe fn cast<U: ComInterface + ?Sized>(self) -> ComPtr<U> {
+        mem::transmute(self)
+    }
 }
 
 impl<T: ComInterface + ?Sized> fmt::Debug for ComPtr<T> {
@@ -97,6 +102,10 @@ impl<T: ComInterface + ?Sized> Clone for ComPtr<T> {
 pub struct ComRc<T: ComInterface + ?Sized>(ComPtr<T>);
 
 impl<T: ComInterface + ?Sized> ComRc<T> {
+    pub unsafe fn cast<U: ComInterface + ?Sized>(self) -> ComRc<U> {
+        mem::transmute(self)
+    }
+
     pub fn as_raw(&self) -> &ComPtr<T> {
         &self.0
     }
@@ -120,17 +129,38 @@ impl<T: ComInterface + ?Sized> Drop for ComRc<T> {
     }
 }
 
-pub trait ComVTables {
-    type Pointers: ComPointers;
+pub trait ComVTable<T, U> {
+    type VTable;
+
+    fn new_vtable() -> Self::VTable;
+}
+
+pub trait ComIid {
+    const IID: IID;
 }
 
 pub trait ComPointers: Sized {
+    fn query_interface(&self, riid: &IID) -> Option<*mut c_void>;
+
     fn dealloc(&self);
 }
 
 macro_rules! com_pointers {
     ($( $fields:tt: $generics:ident ),+) => {
-        impl<$( $generics ),+> ComPointers for ($( *mut $generics, )+) {
+        impl<$( $generics: ComIid ),+> ComPointers for ($( *mut $generics, )+) {
+            fn query_interface(&self, riid: &IID) -> Option<*mut c_void> {
+                if <dyn IUnknown as ComInterface>::IID == *riid {
+                    Some(self.0 as *mut c_void)
+                } else
+                $(
+                    if $generics::IID == *riid {
+                        Some(self.$fields as *mut c_void)
+                    } else
+                )+ {
+                    None
+                }
+            }
+
             fn dealloc(&self) {
                 $(
                     unsafe { Box::from_raw(self.$fields,) };
@@ -144,14 +174,14 @@ com_pointers!(0: T);
 com_pointers!(0: T, 1: U);
 
 #[repr(C)]
-pub struct ComWrapper<T: ComVTables> {
-    pointers: T::Pointers,
+pub struct ComWrapper<T, U> {
+    pointers: U,
     counter: Cell<u32>,
     inner: T,
 }
 
-impl<T: ComVTables> ComWrapper<T> {
-    pub fn new(inner: T, pointers: T::Pointers) -> Self {
+impl<T, U> ComWrapper<T, U> {
+    pub fn new(inner: T, pointers: U) -> Self {
         Self {
             pointers,
             counter: Cell::new(0),
@@ -159,19 +189,17 @@ impl<T: ComVTables> ComWrapper<T> {
         }
     }
 
-    pub unsafe fn into_com_ptr<U: ComInterface + ?Sized>(self) -> ComPtr<U> {
+    pub unsafe fn into_com_rc<O: ComInterface + ?Sized>(self) -> ComRc<O> {
         let ptr = Box::into_raw(Box::new(self));
         mem::transmute(ptr)
     }
 }
 
-impl<T: ComVTables> IUnknown for ComWrapper<T> {
+impl<T, U: ComPointers> IUnknown for ComWrapper<T, U> {
     unsafe fn query_interface(&self, riid: *const GUID, ppv: *mut *mut c_void) -> WinHRESULT {
         let riid = &*riid;
-        if *riid == <dyn IUnknown as ComInterface>::IID
-        //|| <Self as ComInterface>::check_inheritance_chain(riid)
-        {
-            //*ppv = &self.vptr as *const _ as *mut c_void;
+        if let Some(ptr) = self.pointers.query_interface(riid) {
+            *ppv = ptr;
         } else {
             *ppv = ptr::null_mut::<c_void>();
             return E_NOINTERFACE;
@@ -198,10 +226,14 @@ impl<T: ComVTables> IUnknown for ComWrapper<T> {
     }
 }
 
-#[macro_export(local_inner_macros)]
+#[macro_export]
 macro_rules! com_wrapper {
-    ($value:expr => $t:ty: $( $table:ty ),+) => {{
-        let pointers = ( $( Box::into_raw(Box::new(<$table>::new::<$t>())), )+ );
+    ($value:expr => $t:ty: $( $traits:ty ),+) => {{
+        use $crate::IUnknown;
+
+        type Pointers = ( $( *mut <$traits as $crate::ComInterface>::VTable, )+ );
+
+        let pointers = ( $( Box::into_raw(Box::new(<$traits as $crate::ComVTable<$t, Pointers>>::new_vtable())), )+ );
         let wrapper = $crate::ComWrapper::new($value, pointers);
         unsafe {
             wrapper.add_ref();
@@ -253,25 +285,32 @@ macro_rules! com_trait {
             )*
         }
 
-        paste::item! {
-            impl ComInterface for dyn $trait_name {
-                const IID: IID = GUID(WinGUID {
-                    Data1: $data1,
-                    Data2: $data2,
-                    Data3: $data3,
-                    Data4: [
-                        $data40,
-                        $data41,
-                        $data42,
-                        $data43,
-                        $data44,
-                        $data45,
-                        $data46,
-                        $data47,
-                    ],
-                });
-                type Super = dyn $base;
+        impl ComInterface for dyn $trait_name {
+            const IID: IID = GUID(WinGUID {
+                Data1: $data1,
+                Data2: $data2,
+                Data3: $data3,
+                Data4: [
+                    $data40,
+                    $data41,
+                    $data42,
+                    $data43,
+                    $data44,
+                    $data45,
+                    $data46,
+                    $data47,
+                ],
+            });
+            type Super = dyn $base;
+
+            paste::item! {
                 type VTable = [< $trait_name VTable >];
+            }
+        }
+
+        paste::item! {
+            impl ComIid for [< $trait_name VTable >] {
+                const IID: IID = <dyn $trait_name as ComInterface>::IID;
             }
         }
     };
@@ -307,18 +346,22 @@ macro_rules! com_trait {
         }
 
         impl IUnknownVTable {
-            pub fn new<T: ComVTables>() -> Self {
-                Self {
-                    $( $func: Self::$func::<T>, )*
-                }
-            }
-
             $(
-                unsafe extern "stdcall" fn $func<T: ComVTables>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
-                    let this = this as *mut ComWrapper<T>;
+                unsafe extern "stdcall" fn $func<T, U: ComPointers>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
+                    let this = this as *mut ComWrapper<T, U>;
                     (*this).$func($( $arg_name ),*)
                 }
             )*
+        }
+
+        impl<T, U: ComPointers> ComVTable<T, U> for dyn IUnknown {
+            type VTable = IUnknownVTable;
+
+            fn new_vtable() -> Self::VTable {
+                Self::VTable {
+                    $( $func: Self::VTable::$func::<T, U>, )*
+                }
+            }
         }
     };
     (
@@ -327,10 +370,21 @@ macro_rules! com_trait {
             $( unsafe fn $func:ident(&self, $( $arg_name:ident: $arg_ty:ty, )*) -> $ret:ty; )*
         }
     ) => {
-        impl<T: ComVTables + $trait_name> $trait_name for ComWrapper<T> {
+        impl<T: $trait_name, U> $trait_name for ComWrapper<T, U> {
             $(
                 unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret {
-                    self.inner.$func($( $arg_name, )*)
+                    $trait_name::$func(&self.inner, $( $arg_name, )*)
+                }
+            )*
+        }
+
+        impl<T: ComInterface + $trait_name + ?Sized> $trait_name for ComPtr<T> {
+            $(
+                paste::item! {
+                    unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret {
+                        let vptr = self.inner.as_ptr() as *mut *const [< $trait_name VTable >];
+                        ((**vptr).$func)(vptr, $( $arg_name, )*)
+                    }
                 }
             )*
         }
@@ -342,29 +396,24 @@ macro_rules! com_trait {
                 $( $func: unsafe extern "stdcall" fn(this: *mut *const Self, $( $arg_ty ),*) -> $ret, )*
             }
 
-            impl<T: ComInterface + $trait_name + ?Sized> $trait_name for ComPtr<T> {
+            impl [< $trait_name VTable >] {
                 $(
-                    unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret {
-                        let vptr = self.inner.as_ptr() as *mut *const [< $trait_name VTable >];
-                        ((**vptr).$func)(vptr, $( $arg_name, )*)
+                    unsafe extern "stdcall" fn $func<T: $trait_name, U: ComPointers>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
+                        let this = this as *mut ComWrapper<T, U>;
+                        $trait_name::$func(&*this, $( $arg_name ),*)
                     }
                 )*
             }
 
-            impl [< $trait_name VTable >] {
-                pub fn new<T: ComVTables + $trait_name>() -> Self {
-                    Self {
-                        _base: [< $base VTable >] ::new::<T>(),
-                        $( $func: Self::$func::<T>, )*
+            impl<T: $trait_name, U: ComPointers> ComVTable<T, U> for dyn $trait_name {
+                type VTable = [< $trait_name VTable >];
+
+                fn new_vtable() -> Self::VTable {
+                    Self::VTable {
+                        _base: <dyn $base as ComVTable<T, U>>::new_vtable(),
+                        $( $func: Self::VTable::$func::<T, U>, )*
                     }
                 }
-
-                $(
-                    unsafe extern "stdcall" fn $func<T: ComVTables + $trait_name>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
-                        let this = this as *mut ComWrapper<T>;
-                        (*this).$func($( $arg_name ),*)
-                    }
-                )*
             }
         }
     };
@@ -452,7 +501,14 @@ macro_rules! com_impl {
 // we define our HRESULT with `must_use` attribute to not forget to handle it
 #[repr(transparent)]
 #[must_use]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct HRESULT(WinHRESULT);
+
+impl PartialEq<WinHRESULT> for HRESULT {
+    fn eq(&self, other: &i32) -> bool {
+        self.0 == *other
+    }
+}
 
 impl Deref for HRESULT {
     type Target = WinHRESULT;
@@ -464,6 +520,7 @@ impl Deref for HRESULT {
 
 // workaround issue #60553
 #[repr(C)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct EnumWrapper<T, U> {
     value: U,
     _enum_ty: PhantomData<T>,
@@ -492,7 +549,6 @@ macro_rules! issue_60553 {
         #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
         pub enum $name {
             $( $variant, )*
-            Other($int),
         }
 
         paste::item! {
@@ -500,10 +556,10 @@ macro_rules! issue_60553 {
         }
 
         impl EnumWrapper<$name, $int> {
-            pub fn into_inner(self) -> $name {
+            pub fn into_inner(self) -> Option<$name> {
                 match self.value {
-                    $( $discriminant => $name::$variant, )*
-                    x => $name::Other(x),
+                    $( $discriminant => Some($name::$variant), )*
+                    _ => None,
                 }
             }
         }
@@ -724,7 +780,7 @@ com_trait! {
             &self,
             error_code: *mut c_int,
             message: *mut ComRc<dyn IAIMPString>,
-            details: *mut ComRc<dyn IAIMPString>,
+            details: *mut Option<ComRc<dyn IAIMPString>>,
         ) -> HRESULT;
 
         unsafe fn get_info_formatted(&self, s: *mut ComRc<dyn IAIMPString>,) -> HRESULT;
@@ -733,7 +789,7 @@ com_trait! {
             &self,
             error_code: c_int,
             message: ComRc<dyn IAIMPString>,
-            details: ComRc<dyn IAIMPString>,
+            details: Option<ComRc<dyn IAIMPString>>,
         ) -> ();
     }
 }
@@ -837,7 +893,7 @@ impl ImageDraw {
 
 com_trait! {
     pub trait IAIMPImage2: IAIMPImage {
-        const IID = {0x41494D50, 0x496D, 0x6167, 0x65, 032, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        const IID = {0x41494D50, 0x496D, 0x6167, 0x65, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
         unsafe fn load_from_resource(
             &self,
@@ -878,7 +934,7 @@ com_trait! {
     pub trait IAIMPMemoryStream: IAIMPStream {
         const IID = {0x41494D50, 0x4D65, 0x6D53, 0x74, 0x72, 0x65, 0x61, 0x6D, 0x00, 0x00, 0x00};
 
-        unsafe fn get_data(&self,) -> *mut c_void;
+        unsafe fn get_data(&self,) -> *mut u8;
     }
 }
 
@@ -930,7 +986,7 @@ com_trait! {
             &self,
             property_id: c_int,
             iid: REFIID,
-            value: *mut *mut c_void,
+            value: *mut ComRc<dyn IUnknown>,
         ) -> HRESULT;
 
         unsafe fn set_value_as_float(&self, property_id: c_int, value: c_double,) -> HRESULT;
@@ -1073,21 +1129,21 @@ com_trait! {
 
         unsafe fn get_position(&self,) -> i64;
 
-        unsafe fn seek(&self, offset: i64, mode: StreamSeekMode,) -> HRESULT;
+        unsafe fn seek(&self, offset: i64, mode: StreamSeekFrom,) -> HRESULT;
 
-        unsafe fn read(&self, buffer: *mut c_uchar, count: c_uchar,) -> c_int;
+        unsafe fn read(&self, buffer: *mut c_uchar, count: DWORD,) -> c_int;
 
-        unsafe fn write(&self, buffer: *mut c_uchar, count: c_uchar, written: *mut c_uchar,) -> HRESULT;
+        unsafe fn write(&self, buffer: *const c_uchar, count: DWORD, written: *mut DWORD,) -> HRESULT;
     }
 }
 
 #[repr(i32)]
 #[non_exhaustive]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum StreamSeekMode {
-    FromBeginning = 0,
-    FromCurrent = 1,
-    FromEnd = 2,
+pub enum StreamSeekFrom {
+    Beginning = 0,
+    Current = 1,
+    End = 2,
 }
 
 // Threading
@@ -1098,13 +1154,13 @@ com_trait! {
 
         unsafe fn execute_in_main_thread(
             &self,
-            task: ComPtr<dyn IAIMPTask>,
+            task: ComRc<dyn IAIMPTask>,
             flags: ServiceThreadsFlags,
         ) -> HRESULT;
 
         unsafe fn execute_in_thread(
             &self,
-            task: ComPtr<dyn IAIMPTask>,
+            task: ComRc<dyn IAIMPTask>,
             task_handle: *mut DWORD_PTR,
         ) -> HRESULT;
 
@@ -1157,5 +1213,224 @@ pub enum TaskPriority {
 impl Default for TaskPriority {
     fn default() -> Self {
         Self::Normal
+    }
+}
+
+// Internet
+
+com_trait! {
+    pub trait IAIMPServiceConnectionSettings: IAIMPPropertyList {
+        const IID = {0x4941494D, 0x5053, 0x7276, 0x43, 0x6F, 0x6E, 0x6E, 0x43, 0x66, 0x67, 0x00};
+    }
+}
+
+issue_60553! {
+    #[repr(i32)]
+    #[non_exhaustive]
+    #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+    pub enum ConnectionType {
+        Direct = 0,
+        Proxy = 1,
+        SystemDefaults = 2,
+    }
+}
+
+#[repr(i32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum ConnectionSettingsProp {
+    ConnectionType = 1,
+    ProxyServer = 2,
+    ProxyPort = 3,
+    ProxyUsername = 4,
+    ProxyUserPass = 5,
+    Timeout = 6,
+    UserAgent = 7,
+}
+
+com_trait! {
+    pub trait IAIMPServiceHTTPClient: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7648, 0x74, 0x74, 0x70, 0x43, 0x6C, 0x74, 0x00, 0x00};
+
+        unsafe fn get(
+            &self,
+            url: ComRc<dyn IAIMPString>,
+            flags: HttpClientFlags,
+            answer_data: ComRc<dyn IAIMPString>,
+            event_handler: ComRc<dyn IAIMPHTTPClientEvents>,
+            params: Option<ComRc<dyn IAIMPConfig>>,
+            task_id: *mut *const c_void,
+        ) -> HRESULT;
+
+        unsafe fn post(
+            &self,
+            url: ComRc<dyn IAIMPString>,
+            flags: HttpClientFlags,
+            answer_data: ComRc<dyn IAIMPString>,
+            post_data: Option<ComRc<dyn IAIMPStream>>,
+            event_handler: ComRc<dyn IAIMPHTTPClientEvents>,
+            params: Option<ComRc<dyn IAIMPConfig>>,
+            task_id: *mut *const c_void,
+        ) -> HRESULT;
+
+        unsafe fn cancel(&self, task_id: *const c_void, flags: HttpClientFlags,) -> HRESULT;
+    }
+}
+
+bitflags! {
+    pub struct HttpClientRestFlags: DWORD {
+        const NONE = 0;
+        const WAIT_FOR = 1;
+        const UTF8 = 2;
+    }
+}
+
+#[repr(u32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum HttpClientPriorityFlags {
+    Normal = 0,
+    Low = 4,
+    High = 8,
+}
+
+impl Default for HttpClientPriorityFlags {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+pub struct HttpClientFlags(DWORD);
+
+impl HttpClientFlags {
+    pub fn new(rest: HttpClientRestFlags, priority: HttpClientPriorityFlags) -> Self {
+        Self(rest.bits as DWORD | priority as DWORD)
+    }
+}
+
+com_trait! {
+    pub trait IAIMPHTTPClientEvents: IUnknown {
+        const IID = {0x41494D50, 0x4874, 0x7470, 0x43, 0x6C, 0x74, 0x45, 0x76, 0x74, 0x73, 0x00};
+
+        unsafe fn on_accept(&self, content_type: ComRc<dyn IAIMPString>, content_size: i64, allow: *mut BOOL,) -> ();
+
+        unsafe fn on_complete(&self, error_info: Option<ComRc<dyn IAIMPErrorInfo>>, canceled: BOOL,) -> ();
+
+        unsafe fn on_progress(&self, downloaded: i64, total: i64,) -> ();
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceHTTPClient2: IAIMPServiceHTTPClient {
+        const IID = {0x41494D50, 0x5372, 0x7648, 0x74, 0x74, 0x70, 0x43, 0x6C, 0x74, 0x32, 0x00};
+
+        unsafe fn request(
+            &self,
+            url: ComRc<dyn IAIMPString>,
+            method: HttpMethod,
+            flags: HttpClientFlags,
+            answer_data: ComPtr<dyn IAIMPStream>,
+            post_data: Option<ComRc<dyn IAIMPStream>>,
+            event_handler: ComRc<dyn IAIMPHTTPClientEvents>,
+            params: Option<ComRc<dyn IAIMPConfig>>,
+            task_id: *mut *const c_void,
+        ) -> HRESULT;
+
+        unsafe fn cancel(&self, task_id: *const c_void, flags: HttpClientFlags,) -> HRESULT;
+    }
+}
+
+#[repr(u32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Head,
+}
+
+com_trait! {
+    pub trait IAIMPHTTPClientEvents2: IAIMPHTTPClientEvents {
+        const IID = {0x41494D50, 0x4874, 0x7470, 0x43, 0x6C, 0x74, 0x45, 0x76, 0x74, 0x73, 0x32};
+
+        unsafe fn on_accept_headers(&self, header: ComRc<dyn IAIMPString>, allow: *mut BOOL,) -> ();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn com_ptr_size() {
+        assert_eq!(
+            mem::size_of::<Option<ComPtr<dyn IUnknown>>>(),
+            mem::size_of::<*mut *mut <dyn IUnknown as ComInterface>::VTable>()
+        );
+    }
+
+    #[test]
+    fn com_rc_size() {
+        assert_eq!(
+            mem::size_of::<Option<ComRc<dyn IUnknown>>>(),
+            mem::size_of::<*mut *mut <dyn IUnknown as ComInterface>::VTable>()
+        );
+    }
+
+    #[test]
+    fn check_inheritance_chain() {
+        struct Wrapper;
+
+        impl IAIMPPlugin for Wrapper {
+            unsafe fn info_get(&self, _index: PluginInfoWrapper) -> *mut u16 {
+                unimplemented!()
+            }
+
+            unsafe fn info_get_categories(&self) -> PluginCategory {
+                unimplemented!()
+            }
+
+            unsafe fn initialize(&self, _core: ComPtr<dyn IAIMPCore>) -> i32 {
+                unimplemented!()
+            }
+
+            unsafe fn finalize(&self) -> i32 {
+                unimplemented!()
+            }
+
+            unsafe fn system_notification(
+                &self,
+                _notify_id: SystemNotificationWrapper,
+                _data: ComPtr<dyn IUnknown>,
+            ) {
+            }
+        }
+
+        impl IAIMPExternalSettingsDialog for Wrapper {
+            unsafe fn show(&self, _parent_window: HWND) -> () {}
+        }
+
+        let wrapper =
+            com_wrapper!(Wrapper => Wrapper: dyn IAIMPPlugin, dyn IAIMPExternalSettingsDialog);
+        assert_eq!(
+            wrapper
+                .pointers
+                .query_interface(&<dyn IUnknown as ComInterface>::IID,),
+            Some(wrapper.pointers.0 as *mut _)
+        );
+        assert_eq!(
+            wrapper
+                .pointers
+                .query_interface(&<dyn IAIMPPlugin as ComInterface>::IID),
+            Some(wrapper.pointers.0 as *mut _)
+        );
+        assert_eq!(
+            wrapper
+                .pointers
+                .query_interface(&<dyn IAIMPExternalSettingsDialog as ComInterface>::IID),
+            Some(wrapper.pointers.1 as *mut _)
+        );
     }
 }

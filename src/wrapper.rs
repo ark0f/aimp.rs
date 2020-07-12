@@ -1,7 +1,13 @@
-use crate::{core, msg_box, threading, util::ToWide, Plugin};
-use iaimp::IAIMPPluginVTable;
+use crate::{
+    core::CORE,
+    internet::{CONNECTION_SETTINGS, HTTP_CLIENT},
+    msg_box,
+    threading::THREADS,
+    util::ToWide,
+    Plugin,
+};
 use iaimp::{
-    ComPtr, ComVTables, IAIMPCore, IAIMPPlugin, IUnknown, PluginCategory, PluginInfoWrapper,
+    ComPtr, IAIMPCore, IAIMPPlugin, IUnknown, PluginCategory, PluginInfoWrapper,
     SystemNotificationWrapper,
 };
 use std::{cell::Cell, ptr};
@@ -15,11 +21,8 @@ pub struct Wrapper<T> {
     info: WrapperInfo,
 }
 
-impl<T> ComVTables for Wrapper<T> {
-    type Pointers = (*mut IAIMPPluginVTable,);
-}
-
 impl<T: Plugin> Wrapper<T> {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             inner: Cell::new(None),
@@ -31,10 +34,10 @@ impl<T: Plugin> Wrapper<T> {
 impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
     unsafe fn info_get(&self, index: PluginInfoWrapper) -> PWCHAR {
         let p = match index.into_inner() {
-            iaimp::PluginInfo::Name => self.info.name.as_ptr(),
-            iaimp::PluginInfo::Author => self.info.author.as_ptr(),
-            iaimp::PluginInfo::ShortDescription => self.info.short_description.as_ptr(),
-            iaimp::PluginInfo::FullDescription => self
+            Some(iaimp::PluginInfo::Name) => self.info.name.as_ptr(),
+            Some(iaimp::PluginInfo::Author) => self.info.author.as_ptr(),
+            Some(iaimp::PluginInfo::ShortDescription) => self.info.short_description.as_ptr(),
+            Some(iaimp::PluginInfo::FullDescription) => self
                 .info
                 .full_description
                 .as_ref()
@@ -50,12 +53,13 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
     }
 
     unsafe fn initialize(&self, core: ComPtr<dyn IAIMPCore>) -> HRESULT {
-        core::init(core);
+        CORE.init(core);
+        let core = CORE.get();
+        THREADS.init(core.query_object());
+        CONNECTION_SETTINGS.init(core.query_object());
+        HTTP_CLIENT.init(core.query_object());
 
-        let core = core::get();
-        threading::init(core.query_object());
-
-        match T::new(core.clone()) {
+        match T::new() {
             Ok(plugin) => {
                 self.inner.set(Some(plugin));
                 S_OK

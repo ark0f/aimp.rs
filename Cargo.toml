@@ -7,12 +7,15 @@ edition = "2018"
 [workspace]
 members = [
     "iaimp",
-    "iaimp/tests/check_dll_export"
+    "examples/polygon",
 ]
 
 [dependencies]
+thiserror = "1.0.20"
 iaimp = { path = "iaimp" }
+parking_lot = "0.11.0"
 winapi = { version = "0.3.8", features = ["winuser"] }
 impls = "1.0.3"
 futures = "0.3.5"
 paste = "0.1.18"
+http = "0.2.1"
