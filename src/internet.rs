@@ -218,9 +218,9 @@ where
         Request { builder: self }
     }
 
-    pub fn send(self) -> Result<HttpTask> {
-        let uri = self.uri.to_string();
-        let (uri_and_headers, _) = self.headers.into_iter().try_fold(
+    fn make_uri_and_headers(uri: Uri, headers: HeaderMap) -> Result<AimpString> {
+        let uri = uri.to_string();
+        let (uri_and_headers, _) = headers.into_iter().try_fold(
             (uri, None),
             |(mut uri, mut last_header), (name, value)| {
                 let name = name
@@ -231,7 +231,11 @@ where
                 Ok::<_, HttpError>((uri, last_header))
             },
         )?;
-        let uri_and_headers = AimpString::from(uri_and_headers).0;
+        Ok(AimpString::from(uri_and_headers))
+    }
+
+    pub fn send(self) -> Result<HttpTask> {
+        let uri_and_headers = Self::make_uri_and_headers(self.uri, self.headers)?.0;
         let method = self.method;
         let flags = HttpClientFlags::new(HttpClientRestFlags::UTF8, self.priority);
         let answer_data = MemoryStream::default();
