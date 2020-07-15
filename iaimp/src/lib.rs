@@ -72,24 +72,7 @@ impl<T: ComInterface + ?Sized> ComPtr<T> {
 
 impl<T: ComInterface + ?Sized> fmt::Debug for ComPtr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.inner.fmt(f)
-    }
-}
-
-impl<T: ComInterface + ?Sized> IUnknown for ComPtr<T> {
-    unsafe fn query_interface(&self, riid: *const GUID, ppv: *mut *mut c_void) -> i32 {
-        let vptr = self.inner.as_ptr() as *mut *const IUnknownVTable;
-        ((**vptr).query_interface)(vptr, riid, ppv)
-    }
-
-    unsafe fn add_ref(&self) -> u32 {
-        let vptr = self.inner.as_ptr() as *mut *const IUnknownVTable;
-        ((**vptr).add_ref)(vptr)
-    }
-
-    unsafe fn release(&self) -> u32 {
-        let vptr = self.inner.as_ptr() as *mut *const IUnknownVTable;
-        ((**vptr).release)(vptr)
+        fmt::Debug::fmt(&self.inner, f)
     }
 }
 
@@ -99,15 +82,29 @@ impl<T: ComInterface + ?Sized> Clone for ComPtr<T> {
     }
 }
 
+impl<T: ComInterface + ?Sized> PartialEq for ComPtr<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.as_ptr() == other.inner.as_ptr()
+    }
+}
+
+impl<T: ComInterface + ?Sized> Eq for ComPtr<T> {}
+
 pub struct ComRc<T: ComInterface + ?Sized>(ComPtr<T>);
+
+impl<T: ComInterface + ?Sized> fmt::Debug for ComRc<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
 
 impl<T: ComInterface + ?Sized> ComRc<T> {
     pub unsafe fn cast<U: ComInterface + ?Sized>(self) -> ComRc<U> {
         mem::transmute(self)
     }
 
-    pub fn as_raw(&self) -> &ComPtr<T> {
-        &self.0
+    pub fn as_raw(&self) -> ComPtr<T> {
+        self.0.clone()
     }
 }
 
@@ -129,17 +126,33 @@ impl<T: ComInterface + ?Sized> Drop for ComRc<T> {
     }
 }
 
-pub trait ComVTable<T, U> {
+pub trait ComProdInterface<T, P, O> {
     type VTable;
 
     fn new_vtable() -> Self::VTable;
 }
 
-pub trait ComIid {
-    const IID: IID;
+pub trait ComVTable {
+    type Interface: ComInterface + ?Sized;
 }
 
-pub trait ComPointers: Sized {
+pub trait ComOffset {
+    const VALUE: usize;
+}
+
+pub struct ZeroOffset;
+
+impl ComOffset for ZeroOffset {
+    const VALUE: usize = 0;
+}
+
+pub struct OneOffset;
+
+impl ComOffset for OneOffset {
+    const VALUE: usize = 1;
+}
+
+pub trait ComPointers: fmt::Debug + Sized {
     fn query_interface(&self, riid: &IID) -> Option<*mut c_void>;
 
     fn dealloc(&self);
@@ -147,14 +160,14 @@ pub trait ComPointers: Sized {
 
 macro_rules! com_pointers {
     ($( $fields:tt: $generics:ident ),+) => {
-        impl<$( $generics: ComIid ),+> ComPointers for ($( *mut $generics, )+) {
+        impl<$( $generics: ComVTable ),+> ComPointers for ($( *mut $generics, )+) {
             fn query_interface(&self, riid: &IID) -> Option<*mut c_void> {
                 if <dyn IUnknown as ComInterface>::IID == *riid {
-                    Some(self.0 as *mut c_void)
+                    Some(&self.0 as *const _ as *mut c_void)
                 } else
                 $(
-                    if $generics::IID == *riid {
-                        Some(self.$fields as *mut c_void)
+                    if $generics::Interface::check_inheritance_chain(riid) {
+                        Some(&self.$fields as *const _ as *mut c_void)
                     } else
                 )+ {
                     None
@@ -180,7 +193,7 @@ pub struct ComWrapper<T, U> {
     inner: T,
 }
 
-impl<T, U> ComWrapper<T, U> {
+impl<T, U: ComPointers> ComWrapper<T, U> {
     pub fn new(inner: T, pointers: U) -> Self {
         Self {
             pointers,
@@ -190,6 +203,7 @@ impl<T, U> ComWrapper<T, U> {
     }
 
     pub unsafe fn into_com_rc<O: ComInterface + ?Sized>(self) -> ComRc<O> {
+        self.add_ref();
         let ptr = Box::into_raw(Box::new(self));
         mem::transmute(ptr)
     }
@@ -201,7 +215,7 @@ impl<T, U: ComPointers> IUnknown for ComWrapper<T, U> {
         if let Some(ptr) = self.pointers.query_interface(riid) {
             *ppv = ptr;
         } else {
-            *ppv = ptr::null_mut::<c_void>();
+            *ppv = ptr::null_mut();
             return E_NOINTERFACE;
         }
         self.add_ref();
@@ -221,25 +235,39 @@ impl<T, U: ComPointers> IUnknown for ComWrapper<T, U> {
         self.counter.set(value);
         if value == 0 {
             self.pointers.dealloc();
+            Box::from_raw(self as *const Self as *mut Self);
         }
         value
     }
 }
 
-#[macro_export]
+impl<T, U: fmt::Debug> fmt::Debug for ComWrapper<T, U> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("ComWrapper")
+            .field("pointers", &self.pointers)
+            .field("counter", &self.counter)
+            .finish()
+    }
+}
+
+#[macro_export(local_inner_macros)]
 macro_rules! com_wrapper {
     ($value:expr => $t:ty: $( $traits:ty ),+) => {{
-        use $crate::IUnknown;
-
         type Pointers = ( $( *mut <$traits as $crate::ComInterface>::VTable, )+ );
 
-        let pointers = ( $( Box::into_raw(Box::new(<$traits as $crate::ComVTable<$t, Pointers>>::new_vtable())), )+ );
+        let pointers = com_wrapper!(@alloc $t => $( $traits ),+);
         let wrapper = $crate::ComWrapper::new($value, pointers);
-        unsafe {
-            wrapper.add_ref();
-        }
         wrapper
     }};
+    (@box $t:ty, $t1:ty, $offset:ty) => {
+        Box::into_raw(Box::new(<$t1 as $crate::ComProdInterface<$t, Pointers, $offset>>::new_vtable()))
+    };
+    (@alloc $t:ty => $t1:ty) => {
+        (com_wrapper!(@box $t, $t1, $crate::ZeroOffset),)
+    };
+    (@alloc $t:ty => $t1:ty, $t2:ty) => {
+        (com_wrapper!(@box $t, $t1, $crate::ZeroOffset), com_wrapper!(@box $t, $t2, $crate::OneOffset))
+    }
 }
 
 #[macro_export(local_inner_macros)]
@@ -309,8 +337,8 @@ macro_rules! com_trait {
         }
 
         paste::item! {
-            impl ComIid for [< $trait_name VTable >] {
-                const IID: IID = <dyn $trait_name as ComInterface>::IID;
+            impl ComVTable for [< $trait_name VTable >] {
+                type Interface = dyn $trait_name;
             }
         }
     };
@@ -347,20 +375,47 @@ macro_rules! com_trait {
 
         impl IUnknownVTable {
             $(
-                unsafe extern "stdcall" fn $func<T, U: ComPointers>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
-                    let this = this as *mut ComWrapper<T, U>;
+                unsafe extern "stdcall" fn $func<T, U: ComPointers, O: ComOffset>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
+                    let this = this.sub(O::VALUE) as *mut ComWrapper<T, U>;
                     (*this).$func($( $arg_name ),*)
                 }
             )*
         }
 
-        impl<T, U: ComPointers> ComVTable<T, U> for dyn IUnknown {
+        impl fmt::Debug for IUnknownVTable {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.debug_struct("IUnknownVTable")
+                    $(
+                        .field(&std::stringify!($func), &(self.$func as *const c_void))
+                    )*
+                    .finish()
+            }
+        }
+
+        impl<T, U: ComPointers, O: ComOffset> ComProdInterface<T, U, O> for dyn IUnknown {
             type VTable = IUnknownVTable;
 
             fn new_vtable() -> Self::VTable {
                 Self::VTable {
-                    $( $func: Self::VTable::$func::<T, U>, )*
+                    $( $func: Self::VTable::$func::<T, U, O>, )*
                 }
+            }
+        }
+
+        impl<T: ComInterface + ?Sized> IUnknown for ComPtr<T> {
+            unsafe fn query_interface(&self, riid: *const GUID, ppv: *mut *mut c_void) -> i32 {
+                let vptr = std::dbg!(self.inner.as_ptr()) as *mut *const IUnknownVTable;
+                ((**vptr).query_interface)(vptr, riid, ppv)
+            }
+
+            unsafe fn add_ref(&self) -> u32 {
+                let vptr = self.inner.as_ptr() as *mut *const IUnknownVTable;
+                ((**vptr).add_ref)(vptr)
+            }
+
+            unsafe fn release(&self) -> u32 {
+                let vptr = self.inner.as_ptr() as *mut *const IUnknownVTable;
+                ((**vptr).release)(vptr)
             }
         }
     };
@@ -398,100 +453,32 @@ macro_rules! com_trait {
 
             impl [< $trait_name VTable >] {
                 $(
-                    unsafe extern "stdcall" fn $func<T: $trait_name, U: ComPointers>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
-                        let this = this as *mut ComWrapper<T, U>;
+                    unsafe extern "stdcall" fn $func<T: $trait_name, U: ComPointers, O: ComOffset>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
+                        let this = this.sub(O::VALUE) as *mut ComWrapper<T, U>;
                         $trait_name::$func(&*this, $( $arg_name ),*)
                     }
                 )*
             }
 
-            impl<T: $trait_name, U: ComPointers> ComVTable<T, U> for dyn $trait_name {
+            impl fmt::Debug for [< $trait_name VTable >] {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.debug_struct(&std::stringify!([< $trait_name VTable >]))
+                        .field("base", &self._base)
+                        $(
+                            .field(&std::stringify!($func), &(self.$func as *const c_void))
+                        )*
+                        .finish()
+                }
+            }
+
+            impl<T: $trait_name, U: ComPointers, O: ComOffset> ComProdInterface<T, U, O> for dyn $trait_name {
                 type VTable = [< $trait_name VTable >];
 
                 fn new_vtable() -> Self::VTable {
                     Self::VTable {
-                        _base: <dyn $base as ComVTable<T, U>>::new_vtable(),
-                        $( $func: Self::VTable::$func::<T, U>, )*
+                        _base: <dyn $base as ComProdInterface<T, U, O>>::new_vtable(),
+                        $( $func: Self::VTable::$func::<T, U, O>, )*
                     }
-                }
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! com_impl {
-    (
-        $vis:vis struct $name:ident $( < $( $generics:ident ),* > )? : $impl_vtable:ident {
-            $( $field_name:ident : $field_ty:ty, )*
-        }
-    ) => {
-        paste::item! {
-            $vis struct $name $( < $( $generics ),* > )? {
-                $( $field_name: $field_ty, )*
-            }
-
-            #[repr(C)]
-            struct [< Raw $name >] $( < $( $generics ),* > )? {
-                vptr: *mut [< $impl_vtable VTable >],
-                counter: std::cell::Cell<u32>,
-                inner: $name $( < $( $generics ),* > )?,
-            }
-
-            impl $( < $( $generics ),* > )? IUnknown for $name $( < $( $generics ),* > )? {
-                unsafe fn query_interface(&self, riid: *const com::sys::GUID, ppv: *mut *mut std::os::raw::c_void) -> i32 {
-                    unreachable!()
-                }
-
-                unsafe fn add_ref(&self) -> u32 {
-                    unreachable!()
-                }
-
-                unsafe fn release(&self) -> u32 {
-                    unreachable!()
-                }
-            }
-
-            impl $( < $( $generics ),* > )? [< Raw $name >] $( < $( $generics ),* > )? {
-                fn new(inner: $name $( < $( $generics ),* > )? ) -> Self {
-                    Self {
-                        vptr: Box::into_raw(Box::new([< $impl_vtable VTable >]::new::<$name>())),
-                        counter: std::cell::Cell::new(0),
-                        inner,
-                    }
-                }
-            }
-
-            impl $( < $( $generics ),* > )? IUnknown for [< Raw $name >] $( < $( $generics ),* > )? {
-                unsafe fn query_interface(&self, riid: *const com::sys::GUID, ppv: *mut *mut std::os::raw::c_void) -> i32 {
-                    let riid = &*riid;
-                    if riid == &com::interfaces::iunknown::IID_IUNKNOWN
-                        || <dyn $impl_vtable as com::ComInterface>::is_iid_in_inheritance_chain(riid)
-                    {
-                        *ppv = &self.vptr as *const _ as *mut std::ffi::c_void;
-                    } else {
-                        *ppv = std::ptr::null_mut::<std::ffi::c_void>();
-                        return com::sys::E_NOINTERFACE;
-                    }
-                    self.add_ref();
-                    com::sys::NOERROR
-                }
-
-                unsafe fn add_ref(&self) -> u32 {
-                    let mut value = self.counter.get();
-                    value += 1;
-                    self.counter.set(value);
-                    value
-                }
-
-                unsafe fn release(&self) -> u32 {
-                    let mut value = self.counter.get();
-                    value -= 1;
-                    self.counter.set(value);
-                    if value == 0 {
-                        Box::from_raw(self.vptr);
-                    }
-                    value
                 }
             }
         }
@@ -1256,7 +1243,7 @@ com_trait! {
             &self,
             url: ComRc<dyn IAIMPString>,
             flags: HttpClientFlags,
-            answer_data: ComRc<dyn IAIMPString>,
+            answer_data: ComPtr<dyn IAIMPStream>,
             event_handler: ComRc<dyn IAIMPHTTPClientEvents>,
             params: Option<ComRc<dyn IAIMPConfig>>,
             task_id: *mut *const c_void,
@@ -1266,7 +1253,7 @@ com_trait! {
             &self,
             url: ComRc<dyn IAIMPString>,
             flags: HttpClientFlags,
-            answer_data: ComRc<dyn IAIMPString>,
+            answer_data: ComPtr<dyn IAIMPString>,
             post_data: Option<ComRc<dyn IAIMPStream>>,
             event_handler: ComRc<dyn IAIMPHTTPClientEvents>,
             params: Option<ComRc<dyn IAIMPConfig>>,
@@ -1321,7 +1308,7 @@ com_trait! {
 }
 
 com_trait! {
-    pub trait IAIMPServiceHTTPClient2: IAIMPServiceHTTPClient {
+    pub trait IAIMPServiceHTTPClient2: IUnknown {
         const IID = {0x41494D50, 0x5372, 0x7648, 0x74, 0x74, 0x70, 0x43, 0x6C, 0x74, 0x32, 0x00};
 
         unsafe fn request(
@@ -1352,7 +1339,7 @@ pub enum HttpMethod {
 }
 
 com_trait! {
-    pub trait IAIMPHTTPClientEvents2: IAIMPHTTPClientEvents {
+    pub trait IAIMPHTTPClientEvents2: IUnknown {
         const IID = {0x41494D50, 0x4874, 0x7470, 0x43, 0x6C, 0x74, 0x45, 0x76, 0x74, 0x73, 0x32};
 
         unsafe fn on_accept_headers(&self, header: ComRc<dyn IAIMPString>, allow: *mut BOOL,) -> ();
@@ -1362,6 +1349,7 @@ com_trait! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::MaybeUninit;
 
     #[test]
     fn com_ptr_size() {
@@ -1379,58 +1367,85 @@ mod tests {
         );
     }
 
+    com_trait! {
+        pub trait A: IUnknown {
+            const IID = {0x11111111, 0x4874, 0x7470, 0x43, 0x6C, 0x74, 0x45, 0x76, 0x74, 0x73, 0x00};
+
+            unsafe fn a(&self,) -> ();
+        }
+    }
+
+    com_trait! {
+        pub trait B: IUnknown {
+            const IID = {0x44444444, 0x4874, 0x7470, 0x43, 0x6C, 0x74, 0x45, 0x76, 0x74, 0x73, 0x00};
+
+            unsafe fn b(&self,) -> ();
+        }
+    }
+
+    struct Wrapper;
+
+    impl A for Wrapper {
+        unsafe fn a(&self) {}
+    }
+
+    impl B for Wrapper {
+        unsafe fn b(&self) {}
+    }
+
     #[test]
     fn check_inheritance_chain() {
-        struct Wrapper;
+        let wrapper = com_wrapper!(Wrapper => Wrapper: dyn A, dyn B);
+        assert_eq!(
+            wrapper
+                .pointers
+                .query_interface(&<dyn IUnknown as ComInterface>::IID),
+            Some(&wrapper.pointers.0 as *const _ as *mut _)
+        );
+        assert_eq!(
+            wrapper
+                .pointers
+                .query_interface(&<dyn A as ComInterface>::IID),
+            Some(&wrapper.pointers.0 as *const _ as *mut _)
+        );
+        assert_eq!(
+            wrapper
+                .pointers
+                .query_interface(&<dyn B as ComInterface>::IID),
+            Some(&wrapper.pointers.1 as *const _ as *mut _)
+        );
+    }
 
-        impl IAIMPPlugin for Wrapper {
-            unsafe fn info_get(&self, _index: PluginInfoWrapper) -> *mut u16 {
-                unimplemented!()
-            }
-
-            unsafe fn info_get_categories(&self) -> PluginCategory {
-                unimplemented!()
-            }
-
-            unsafe fn initialize(&self, _core: ComPtr<dyn IAIMPCore>) -> i32 {
-                unimplemented!()
-            }
-
-            unsafe fn finalize(&self) -> i32 {
-                unimplemented!()
-            }
-
-            unsafe fn system_notification(
-                &self,
-                _notify_id: SystemNotificationWrapper,
-                _data: ComPtr<dyn IUnknown>,
-            ) {
-            }
+    #[test]
+    fn check_iunknown_inheritance() {
+        macro_rules! query_interface {
+            ($from:ident, $trait:ty) => {{
+                let mut tmp = MaybeUninit::<ComPtr<$trait>>::uninit();
+                assert_eq!(
+                    $from.query_interface(
+                        &<$trait as ComInterface>::IID,
+                        tmp.as_mut_ptr() as *mut _
+                    ),
+                    NOERROR
+                );
+                tmp.assume_init()
+            }};
         }
 
-        impl IAIMPExternalSettingsDialog for Wrapper {
-            unsafe fn show(&self, _parent_window: HWND) -> () {}
-        }
+        unsafe {
+            let wrapper: ComRc<dyn IUnknown> =
+                com_wrapper!(Wrapper => Wrapper: dyn A, dyn B).into_com_rc();
 
-        let wrapper =
-            com_wrapper!(Wrapper => Wrapper: dyn IAIMPPlugin, dyn IAIMPExternalSettingsDialog);
-        assert_eq!(
-            wrapper
-                .pointers
-                .query_interface(&<dyn IUnknown as ComInterface>::IID,),
-            Some(wrapper.pointers.0 as *mut _)
-        );
-        assert_eq!(
-            wrapper
-                .pointers
-                .query_interface(&<dyn IAIMPPlugin as ComInterface>::IID),
-            Some(wrapper.pointers.0 as *mut _)
-        );
-        assert_eq!(
-            wrapper
-                .pointers
-                .query_interface(&<dyn IAIMPExternalSettingsDialog as ComInterface>::IID),
-            Some(wrapper.pointers.1 as *mut _)
-        );
+            let iunknown = query_interface!(wrapper, dyn IUnknown);
+            let a = query_interface!(wrapper, dyn A);
+            let b = query_interface!(wrapper, dyn B);
+            assert_eq!(iunknown, a.clone().cast());
+
+            let a_iunknown = query_interface!(a, dyn IUnknown);
+            assert_eq!(iunknown, a_iunknown);
+
+            let b_iunknown = query_interface!(b, dyn IUnknown);
+            assert_eq!(iunknown, b_iunknown);
+        }
     }
 }
