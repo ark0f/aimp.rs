@@ -1,20 +1,18 @@
 pub use iaimp::ConnectionType;
 
+use crate::stream::FileStream;
 use crate::{
-    error::HresultExt, msg_box, stream::MemoryStream, util::Static, AimpString, Error, ErrorInfo,
-    PropertyList,
+    error::HresultExt, stream::MemoryStream, util::Static, AimpString, ErrorInfo, PropertyList,
 };
-use http::{
-    header::{IntoHeaderName, ToStrError},
-    uri::InvalidUri,
-    HeaderMap, HeaderValue, Uri,
-};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use http::{header::ToStrError, uri::InvalidUri, Request, Uri};
 use iaimp::{
     com_wrapper, ComPtr, ComRc, ConnectionSettingsProp, ConnectionTypeWrapper, HttpClientFlags,
     HttpClientPriorityFlags, HttpClientRestFlags, HttpMethod, IAIMPErrorInfo,
     IAIMPHTTPClientEvents, IAIMPHTTPClientEvents2, IAIMPServiceConnectionSettings,
     IAIMPServiceHTTPClient2, IAIMPStream, IAIMPString,
 };
+use std::sync::mpsc::SyncSender;
 use std::{
     convert::TryFrom,
     io, mem,
@@ -25,7 +23,7 @@ use std::{
         mpsc::{Receiver, Sender},
     },
 };
-use winapi::shared::minwindef::{BOOL, FALSE, TRUE};
+use winapi::shared::minwindef::{BOOL, TRUE};
 
 pub static CONNECTION_SETTINGS: Static<ConnectionSettings> = Static::new();
 pub static HTTP_CLIENT: Static<HttpClient> = Static::new();
@@ -126,12 +124,6 @@ pub enum HttpError {
         ToStrError,
     ),
     #[error("{0}")]
-    Aimp(
-        #[from]
-        #[source]
-        Error,
-    ),
-    #[error("{0}")]
     Io(
         #[from]
         #[source]
@@ -143,22 +135,32 @@ pub enum HttpError {
         #[source]
         InvalidUri,
     ),
+    #[error("{0}")]
+    Http(
+        #[from]
+        #[source]
+        http::Error,
+    ),
+    #[error("Task was canceled by user")]
+    Canceled,
+    #[error("{0}")]
+    Failed(ErrorInfo),
+    #[error("Method is not supported")]
+    UnsupportedMethod,
 }
 
 pub struct HttpClient(ComPtr<dyn IAIMPServiceHTTPClient2>);
 
 impl HttpClient {
+    pub fn request<T: Body>(req: Request<T>) -> RequestBuilder<T> {
+        req.into()
+    }
+
     pub fn get<T>(uri: T) -> Result<RequestBuilder<()>>
     where
         Uri: TryFrom<T, Error = InvalidUri>,
     {
-        Ok(RequestBuilder {
-            method: HttpMethod::Get,
-            uri: Uri::try_from(uri)?,
-            headers: HeaderMap::new(),
-            body: None,
-            priority: HttpClientPriorityFlags::Normal,
-        })
+        Ok(Request::get(uri).body(())?.into())
     }
 }
 
@@ -178,11 +180,20 @@ impl Body for () {
     }
 }
 
+impl Body for MemoryStream {
+    fn into_stream(self) -> Option<Result<ComRc<dyn IAIMPStream>>> {
+        unsafe { Some(Ok((self.0).0.cast())) }
+    }
+}
+
+impl Body for FileStream {
+    fn into_stream(self) -> Option<Result<ComRc<dyn IAIMPStream>>> {
+        unsafe { Some(Ok((self.0).0.cast())) }
+    }
+}
+
 pub struct RequestBuilder<T> {
-    method: HttpMethod,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Option<T>,
+    request: Request<Option<T>>,
     priority: HttpClientPriorityFlags,
 }
 
@@ -195,57 +206,50 @@ where
         self
     }
 
-    pub fn body(mut self, body: T) -> Self {
-        self.body = Some(body);
-        self
+    fn make_uri_and_headers(&self) -> Result<AimpString> {
+        let uri = self.request.uri().to_string();
+        let headers = self
+            .request
+            .headers()
+            .iter()
+            .map(|(k, v)| Ok(format!("\r\n{}: {}", k, v.to_str()?)))
+            .collect::<Result<String>>()?;
+        Ok(AimpString::from(uri + &headers))
     }
 
-    pub fn headers(mut self, headers: HeaderMap) -> Self {
-        self.headers = headers;
-        self
+    fn match_method(&self) -> Result<HttpMethod> {
+        match *self.request.method() {
+            http::Method::GET => Ok(HttpMethod::Get),
+            http::Method::POST => Ok(HttpMethod::Post),
+            http::Method::PUT => Ok(HttpMethod::Put),
+            http::Method::DELETE => Ok(HttpMethod::Delete),
+            http::Method::HEAD => Ok(HttpMethod::Head),
+            _ => Err(HttpError::UnsupportedMethod),
+        }
     }
 
-    pub fn header<K, V>(mut self, key: K, value: V) -> Self
-    where
-        K: IntoHeaderName,
-        V: Into<HeaderValue>,
-    {
-        self.headers.insert(key, value.into());
-        self
-    }
-
-    pub fn build(self) -> Request<T> {
-        Request { builder: self }
-    }
-
-    fn make_uri_and_headers(uri: Uri, headers: HeaderMap) -> Result<AimpString> {
-        let uri = uri.to_string();
-        let (uri_and_headers, _) = headers.into_iter().try_fold(
-            (uri, None),
-            |(mut uri, mut last_header), (name, value)| {
-                let name = name
-                    .or(last_header)
-                    .expect("Header name at least on the first iteration");
-                uri += &format!("\r\n{}: {}", name, value.to_str()?);
-                last_header = Some(name);
-                Ok::<_, HttpError>((uri, last_header))
-            },
-        )?;
-        Ok(AimpString::from(uri_and_headers))
-    }
-
-    pub fn send(self) -> Result<HttpTask> {
-        let uri_and_headers = Self::make_uri_and_headers(self.uri, self.headers)?.0;
-        let method = self.method;
-        let flags = HttpClientFlags::new(HttpClientRestFlags::UTF8, self.priority);
+    pub fn inner_send(mut self, flags: HttpClientRestFlags) -> Result<HttpTask> {
+        let uri_and_headers = self.make_uri_and_headers()?.0;
+        let method = self.match_method()?;
+        let flags = HttpClientFlags::new(HttpClientRestFlags::UTF8 | flags, self.priority);
         let answer_data = MemoryStream::default();
-        let post_data = self.body.and_then(Body::into_stream).transpose()?;
+        let post_data = self
+            .request
+            .body_mut()
+            .take()
+            .unwrap()
+            .into_stream()
+            .transpose()?;
 
         let downloaded = mpsc::channel();
-        let headers = mpsc::channel();
+        let status = mpsc::sync_channel(1);
+        let content_info = mpsc::sync_channel(1);
+        let complete = mpsc::sync_channel(1);
         let events_handler = EventsHandler {
             downloaded: downloaded.0,
-            headers: headers.0,
+            status: status.0,
+            content_info: content_info.0,
+            complete: complete.0,
         };
         let events_handler = com_wrapper!(events_handler => EventsHandler: dyn IAIMPHTTPClientEvents, dyn IAIMPHTTPClientEvents2);
         let mut task_id = MaybeUninit::uninit();
@@ -258,39 +262,52 @@ where
                     uri_and_headers,
                     method,
                     flags,
-                    (*answer_data).0.as_raw().clone().cast(),
+                    (*answer_data).0.as_raw().cast(),
                     post_data,
                     events_handler.into_com_rc(),
                     None,
                     task_id.as_mut_ptr(),
                 )
-                .into_result()?;
+                .into_result()
+                .unwrap();
 
             Ok(HttpTask {
                 id: task_id.assume_init(),
                 answer_data,
                 downloaded: downloaded.1,
-                headers: headers.1,
+                status: status.1,
+                content_info: content_info.1,
+                complete: complete.1,
             })
         }
     }
+
+    pub fn send(self) -> Result<HttpTask> {
+        self.inner_send(HttpClientRestFlags::NONE)
+    }
+
+    pub fn send_and_wait(self) -> Result<http::Response<MemoryStream>> {
+        self.inner_send(HttpClientRestFlags::WAIT_FOR)?.wait()
+    }
 }
 
-pub struct Request<T> {
-    builder: RequestBuilder<T>,
-}
-
-pub struct Response {
-    body: Vec<u8>,
-    headers: HeaderMap,
-    error: Option<ErrorInfo>,
+impl<T> From<Request<T>> for RequestBuilder<T> {
+    fn from(request: Request<T>) -> Self {
+        let (parts, body) = request.into_parts();
+        Self {
+            request: Request::from_parts(parts, Some(body)),
+            priority: Default::default(),
+        }
+    }
 }
 
 pub struct HttpTask {
     id: *const c_void,
     answer_data: MemoryStream,
     pub downloaded: Receiver<u32>,
-    pub headers: Receiver<AimpString>,
+    status: Receiver<AimpString>,
+    content_info: Receiver<(AimpString, u32)>,
+    complete: Receiver<(Option<ErrorInfo>, BOOL)>,
 }
 
 impl HttpTask {
@@ -315,31 +332,57 @@ impl HttpTask {
     pub fn cancel_and_wait(self) {
         self.inner_cancel(HttpClientRestFlags::WAIT_FOR)
     }
+
+    pub fn wait(self) -> Result<http::Response<MemoryStream>> {
+        let (info, canceled) = self.complete.recv().unwrap();
+        match (info, canceled == TRUE) {
+            (_, true) => Err(HttpError::Canceled),
+            (Some(info), false) => Err(HttpError::Failed(info)),
+            (None, false) => {
+                let mut builder = http::Response::builder();
+
+                let status_line = self.status.recv().unwrap().to_string();
+                let status = status_line.split_ascii_whitespace().nth(1).unwrap();
+                builder = builder.status(status);
+
+                let (content_type, content_length) = self.content_info.recv().unwrap();
+                builder = builder
+                    .header(CONTENT_TYPE, content_type.to_string())
+                    .header(CONTENT_LENGTH, content_length);
+
+                Ok(builder.body(self.answer_data)?)
+            }
+        }
+    }
 }
 
 struct EventsHandler {
     downloaded: Sender<u32>,
-    headers: Sender<AimpString>,
+    status: SyncSender<AimpString>,
+    content_info: SyncSender<(AimpString, u32)>,
+    complete: SyncSender<(Option<ErrorInfo>, BOOL)>,
 }
 
 impl IAIMPHTTPClientEvents for EventsHandler {
     unsafe fn on_accept(
         &self,
-        _content_type: ComRc<dyn IAIMPString>,
-        _content_size: i64,
+        content_type: ComRc<dyn IAIMPString>,
+        content_size: i64,
         allow: *mut BOOL,
     ) {
         *allow = TRUE;
-        msg_box!("on_accept");
+        self.content_info
+            .send((AimpString(content_type), content_size as u32))
+            .unwrap();
     }
 
     unsafe fn on_complete(&self, error_info: Option<ComRc<dyn IAIMPErrorInfo>>, canceled: BOOL) {
-        msg_box!("on_complete");
-        assert_eq!(error_info.is_some(), canceled == FALSE);
+        self.complete
+            .send((error_info.map(ErrorInfo), canceled))
+            .unwrap();
     }
 
     unsafe fn on_progress(&self, downloaded: i64, _total: i64) {
-        msg_box!("on_progress");
         self.downloaded.send(downloaded as u32).unwrap();
     }
 }
@@ -347,7 +390,6 @@ impl IAIMPHTTPClientEvents for EventsHandler {
 impl IAIMPHTTPClientEvents2 for EventsHandler {
     unsafe fn on_accept_headers(&self, header: ComRc<dyn IAIMPString>, allow: *mut BOOL) {
         *allow = TRUE;
-        msg_box!("on_accept_headers");
-        self.headers.send(AimpString(header)).unwrap();
+        self.status.send(AimpString(header)).unwrap();
     }
 }
