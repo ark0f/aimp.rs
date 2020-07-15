@@ -16,7 +16,7 @@ use winapi::shared::{
     winerror::{E_FAIL, HRESULT, S_OK},
 };
 
-pub(crate) static THREADS: Static<Threads> = Static::new();
+pub static THREADS: Static<Threads> = Static::new();
 
 pub struct Threads {
     inner: ComPtr<dyn IAIMPServiceThreads>,
@@ -78,7 +78,7 @@ pub struct Task<T> {
 }
 
 impl<T> Task<T> {
-    pub fn with_priority(mut self, priority: TaskPriority) -> Self {
+    pub fn set_priority(mut self, priority: TaskPriority) -> Self {
         self.priority = priority;
         self
     }
