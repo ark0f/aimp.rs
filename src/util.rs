@@ -24,12 +24,28 @@ pub fn message_box(msg: String) {
 }
 
 pub(crate) trait ToWide {
+    fn to_wide(&self) -> Vec<u16>;
+
     fn to_wide_null(&self) -> Vec<u16>;
 }
 
 impl ToWide for str {
+    fn to_wide(&self) -> Vec<u16> {
+        OsStr::new(self).encode_wide().chain(Some(0)).collect()
+    }
+
     fn to_wide_null(&self) -> Vec<u16> {
         OsStr::new(self).encode_wide().chain(Some(0)).collect()
+    }
+}
+
+impl ToWide for String {
+    fn to_wide(&self) -> Vec<u16> {
+        self.as_str().to_wide()
+    }
+
+    fn to_wide_null(&self) -> Vec<u16> {
+        self.as_str().to_wide_null()
     }
 }
 

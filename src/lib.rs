@@ -10,6 +10,7 @@ pub use crate::core::{Core, CORE};
 pub use error::{Error, ErrorKind, Result};
 pub use iaimp::{CorePath, PluginCategory};
 
+use crate::util::ToWide;
 use error::HresultExt;
 use iaimp::{
     ComInterface, ComPtr, ComRc, IAIMPErrorInfo, IAIMPPropertyList, IAIMPString, StringCase, IID,
@@ -50,6 +51,7 @@ macro_rules! main {
                 Wrapper::new() =>
                 Wrapper: $crate::macro_export::IAIMPPlugin
             );
+            wrapper.add_ref();
             *header = Box::into_raw(Box::new(wrapper)) as _;
 
             $crate::macro_export::S_OK
@@ -172,7 +174,7 @@ impl From<ComRc<dyn IAIMPString>> for AimpString {
 
 impl From<&str> for AimpString {
     fn from(s: &str) -> Self {
-        let data: Vec<u16> = s.encode_utf16().collect();
+        let data: Vec<u16> = s.to_wide();
         let mut s = Self::default();
         unsafe { s.set_data(&data).unwrap() }
         s
@@ -258,6 +260,7 @@ impl AddAssign for AimpString {
     }
 }
 
+#[derive(Debug)]
 pub struct ErrorInfo(ComRc<dyn IAIMPErrorInfo>);
 
 impl Default for ErrorInfo {

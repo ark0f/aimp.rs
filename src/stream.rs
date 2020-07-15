@@ -2,7 +2,7 @@ use crate::{core::CORE, error::HresultExt, AimpString, Error, ErrorKind, Result}
 use futures::io::SeekFrom;
 use iaimp::{ComInterface, ComRc, IAIMPFileStream, IAIMPMemoryStream, IAIMPStream, StreamSeekFrom};
 use std::{
-    io,
+    fmt, io,
     io::{Read, Seek, Write},
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
@@ -88,7 +88,14 @@ impl<T: ComInterface + IAIMPStream + ?Sized> Write for Stream<T> {
     }
 }
 
-pub struct FileStream(Stream<dyn IAIMPFileStream>);
+impl<T: ComInterface + IAIMPStream + ?Sized> fmt::Debug for Stream<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+#[derive(Debug)]
+pub struct FileStream(pub(crate) Stream<dyn IAIMPFileStream>);
 
 impl FileStream {
     pub fn clipping(&self) -> Option<FileStreamClipping> {
@@ -140,13 +147,12 @@ pub struct FileStreamClipping {
     pub size: i64,
 }
 
+#[derive(Debug)]
 pub struct MemoryStream(pub(crate) Stream<dyn IAIMPMemoryStream>);
 
 impl Default for MemoryStream {
     fn default() -> Self {
-        Self(Stream(
-            CORE.get().create::<dyn IAIMPMemoryStream>().unwrap(),
-        ))
+        Self(Stream(CORE.get().create().unwrap()))
     }
 }
 
