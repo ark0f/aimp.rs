@@ -1,6 +1,10 @@
+pub mod actions;
 pub mod core;
 mod error;
+pub mod file;
 pub mod internet;
+#[macro_use]
+mod prop_list;
 pub mod stream;
 pub mod threading;
 mod util;
@@ -13,19 +17,22 @@ pub use iaimp::{CorePath, PluginCategory};
 use crate::util::ToWide;
 use error::HresultExt;
 use iaimp::{
-    ComInterface, ComPtr, ComRc, IAIMPErrorInfo, IAIMPPropertyList, IAIMPString, StringCase, IID,
+    ComInterface, ComPtr, ComRc, IAIMPErrorInfo, IAIMPObjectList, IAIMPProgressCallback,
+    IAIMPString, StringCase,
 };
 use std::{
     cmp::Ordering,
     error::Error as StdError,
     fmt,
     hash::{Hash, Hasher},
+    marker::PhantomData,
     mem::MaybeUninit,
     ops::{Add, AddAssign},
     os::raw::c_int,
     result::Result as StdResult,
     slice,
 };
+use winapi::shared::winerror::E_NOINTERFACE;
 
 #[doc(hidden)]
 pub mod macro_export {
@@ -48,8 +55,7 @@ macro_rules! main {
             std::panic::set_hook(Box::new(|info| msg_box!("{}", info)));
 
             let wrapper = $crate::macro_export::com_wrapper!(
-                Wrapper::new() =>
-                Wrapper: $crate::macro_export::IAIMPPlugin
+                Wrapper::new() => $crate::macro_export::IAIMPPlugin
             );
             wrapper.add_ref();
             *header = Box::into_raw(Box::new(wrapper)) as _;
@@ -77,7 +83,7 @@ pub struct PluginInfo {
     pub category: PluginCategory,
 }
 
-pub struct AimpString(ComRc<dyn IAIMPString>);
+pub struct AimpString(pub ComRc<dyn IAIMPString>);
 
 impl AimpString {
     /// # Safety
@@ -203,7 +209,7 @@ impl fmt::Display for AimpString {
 
 impl fmt::Debug for AimpString {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("AimpString").field(&self.0.as_raw()).finish()
+        self.to_string().fmt(f)
     }
 }
 
@@ -324,102 +330,172 @@ pub struct ErrorInfoContent {
     pub details: Option<AimpString>,
 }
 
-pub struct PropertyList(ComPtr<dyn IAIMPPropertyList>);
+pub trait Object: Sized {
+    type Interface: ComInterface + ?Sized;
 
-impl PropertyList {
-    pub fn get<T: PropertyListAccessor>(&self, id: i32) -> T {
-        T::get(id, self)
+    fn from_com_rc(rc: ComRc<Self::Interface>) -> Self;
+
+    fn into_com_rc(self) -> ComRc<Self::Interface>;
+}
+
+impl Object for AimpString {
+    type Interface = dyn IAIMPString;
+
+    fn from_com_rc(rc: ComRc<Self::Interface>) -> Self {
+        Self(rc)
     }
 
-    pub fn update(&mut self) -> PropertyListGuard {
+    fn into_com_rc(self) -> ComRc<Self::Interface> {
+        self.0
+    }
+}
+
+// TODO: iterator, Index, etc
+pub struct ObjectList(ComRc<dyn IAIMPObjectList>);
+
+impl ObjectList {
+    pub fn push<T: Object>(&mut self, obj: T) {
         unsafe {
-            self.0.begin_update();
-        }
-        PropertyListGuard(self)
-    }
-}
-
-impl<T: ComInterface + IAIMPPropertyList + ?Sized> From<ComPtr<T>> for PropertyList {
-    fn from(ptr: ComPtr<T>) -> Self {
-        unsafe { Self(ptr.cast()) }
-    }
-}
-
-pub struct PropertyListGuard<'a>(&'a mut PropertyList);
-
-impl PropertyListGuard<'_> {
-    pub fn set<T: PropertyListAccessor>(self, id: i32, prop: T) -> Self {
-        prop.set(id, self.0);
-        self
-    }
-}
-
-impl Drop for PropertyListGuard<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            (self.0).0.end_update();
-        }
-    }
-}
-
-pub trait PropertyListAccessor: Sized {
-    fn get(id: i32, list: &PropertyList) -> Self;
-
-    fn set(self, id: i32, list: &mut PropertyList);
-}
-
-macro_rules! impl_prop_get_set {
-    ($prop:ty, $get:ident, $set:ident) => {
-        impl PropertyListAccessor for $prop {
-            fn get(id: i32, list: &PropertyList) -> Self {
-                unsafe {
-                    let mut value = MaybeUninit::uninit();
-                    (list.0).$get(id, value.as_mut_ptr()).into_result().unwrap();
-                    value.assume_init()
-                }
-            }
-
-            fn set(self, id: i32, list: &mut PropertyList) {
-                unsafe {
-                    (list.0).$set(id, self).into_result().unwrap();
-                }
-            }
-        }
-    };
-}
-
-impl_prop_get_set!(f64, get_value_as_float, set_value_as_float);
-impl_prop_get_set!(i32, get_value_as_int32, set_value_as_int32);
-impl_prop_get_set!(i64, get_value_as_int64, set_value_as_int64);
-
-impl<T: ComInterface + ?Sized> PropertyListAccessor for ComRc<T> {
-    fn get(id: i32, list: &PropertyList) -> Self {
-        unsafe {
-            let mut value = MaybeUninit::uninit();
-            list.0
-                .get_value_as_object(id, &T::IID as *const IID as *const _, value.as_mut_ptr())
-                .into_result()
-                .unwrap();
-            value.assume_init().cast()
+            self.0.add(obj.into_com_rc().cast()).into_result().unwrap();
         }
     }
 
-    fn set(self, id: i32, list: &mut PropertyList) {
+    pub fn remove<T: Object>(&mut self, idx: u16) {
         unsafe {
-            list.0
-                .set_value_as_object(id, self.cast())
+            self.0.delete(idx as i32).into_result().unwrap();
+        }
+    }
+
+    pub fn insert<T: Object>(&mut self, idx: u16, obj: T) {
+        unsafe {
+            self.0
+                .insert(idx as i32, obj.into_com_rc().cast())
                 .into_result()
                 .unwrap();
         }
     }
-}
 
-impl PropertyListAccessor for AimpString {
-    fn get(id: i32, list: &PropertyList) -> Self {
-        Self(ComRc::<dyn IAIMPString>::get(id, list))
+    pub fn set_obj<T: Object>(&mut self, idx: u16, obj: T) {
+        unsafe {
+            self.0
+                .set_object(idx as i32, obj.into_com_rc().cast())
+                .into_result()
+                .unwrap();
+        }
     }
 
-    fn set(self, id: i32, list: &mut PropertyList) {
-        self.0.set(id, list)
+    pub fn get_obj<T: Object>(&mut self, idx: u16) -> Option<T> {
+        unsafe {
+            let mut obj = MaybeUninit::uninit();
+            let res =
+                self.0
+                    .get_object(idx as i32, &T::Interface::IID as *const _, obj.as_mut_ptr());
+            if res == E_NOINTERFACE {
+                None
+            } else {
+                res.into_result().unwrap();
+                Some(T::from_com_rc(obj.assume_init().cast()))
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        unsafe {
+            self.0.clear().into_result().unwrap();
+        }
+    }
+
+    pub fn len(&self) -> u16 {
+        unsafe { self.0.get_count() as u16 }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for ObjectList {
+    fn default() -> Self {
+        Self(CORE.get().create().unwrap())
+    }
+}
+
+pub struct List<T> {
+    inner: ObjectList,
+    _t: PhantomData<T>,
+}
+
+impl<T: Object> List<T> {
+    fn from_com_rc(rc: ComRc<dyn IAIMPObjectList>) -> Self {
+        Self {
+            inner: ObjectList(rc),
+            _t: PhantomData,
+        }
+    }
+
+    pub fn push(&mut self, obj: T) {
+        self.inner.push(obj)
+    }
+
+    pub fn remove(&mut self, idx: u16) {
+        self.inner.remove::<T>(idx)
+    }
+
+    pub fn insert(&mut self, idx: u16, obj: T) {
+        self.inner.insert(idx, obj)
+    }
+
+    pub fn set_obj(&mut self, idx: u16, obj: T) {
+        self.inner.set_obj(idx, obj)
+    }
+
+    pub fn get(&mut self, idx: u16) -> T {
+        self.inner.get_obj(idx).unwrap()
+    }
+
+    pub fn clear(&mut self) {
+        self.inner.clear()
+    }
+
+    pub fn len(&self) -> u16 {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+impl<T> Default for List<T> {
+    fn default() -> Self {
+        Self {
+            inner: ObjectList::default(),
+            _t: PhantomData,
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! list {
+    () => { List::default() };
+    ($($x:expr),+ $(,)?) => {{
+        let mut list = List::default();
+        $(
+            list.push($x);
+        )+
+        list
+    }};
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ProgressCallback(pub(crate) ComPtr<dyn IAIMPProgressCallback>);
+
+impl ProgressCallback {
+    pub fn progress(self, progress: f32) -> bool {
+        unsafe {
+            let mut canceled = MaybeUninit::uninit();
+            self.0.process(progress, canceled.as_mut_ptr());
+            canceled.assume_init()
+        }
     }
 }

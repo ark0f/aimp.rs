@@ -1,5 +1,10 @@
 use crate::{
+    actions::ACTION_MANAGER_SERVICE,
     core::CORE,
+    file::{
+        FILE_FORMATS, FILE_INFO_FORMATTER, FILE_INFO_FORMATTER_UTILS, FILE_INFO_SERVICE,
+        FILE_STREAMING, FILE_SYSTEMS, FILE_URI_SERVICE,
+    },
     internet::{CONNECTION_SETTINGS, HTTP_CLIENT},
     msg_box,
     threading::THREADS,
@@ -7,12 +12,15 @@ use crate::{
     Plugin,
 };
 use iaimp::{
-    ComPtr, IAIMPCore, IAIMPPlugin, IUnknown, PluginCategory, PluginInfoWrapper,
-    SystemNotificationWrapper,
+    ComInterface, ComInterfaceQuerier, ComPtr, IAIMPCore, IAIMPPlugin, IAIMPServiceActionManager,
+    IAIMPServiceConnectionSettings, IAIMPServiceFileFormats, IAIMPServiceFileInfo,
+    IAIMPServiceFileInfoFormatter, IAIMPServiceFileInfoFormatterUtils, IAIMPServiceFileStreaming,
+    IAIMPServiceFileSystems, IAIMPServiceFileURI2, IAIMPServiceHTTPClient2, IAIMPServiceThreads,
+    IUnknown, PluginCategory, PluginInfoWrapper, SystemNotification, SystemNotificationWrapper,
 };
-use std::{cell::Cell, ptr};
+use std::{cell::Cell, mem::MaybeUninit, ptr};
 use winapi::{
-    shared::winerror::{E_FAIL, HRESULT, S_OK},
+    shared::winerror::{E_FAIL, HRESULT, NOERROR, S_OK},
     um::winnt::PWCHAR,
 };
 
@@ -58,6 +66,15 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
         THREADS.init(core.query_object());
         CONNECTION_SETTINGS.init(core.query_object());
         HTTP_CLIENT.init(core.query_object());
+        ACTION_MANAGER_SERVICE.init(core.query_object());
+
+        FILE_FORMATS.init(core.query_object());
+        FILE_INFO_SERVICE.init(core.query_object());
+        FILE_INFO_FORMATTER.init(core.query_object());
+        FILE_INFO_FORMATTER_UTILS.init(core.query_object());
+        FILE_STREAMING.init(core.query_object());
+        FILE_URI_SERVICE.init(core.query_object());
+        FILE_SYSTEMS.init(core.query_object());
 
         match T::new() {
             Ok(plugin) => {
@@ -83,11 +100,49 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
 
     unsafe fn system_notification(
         &self,
-        _notify_id: SystemNotificationWrapper,
-        _data: ComPtr<dyn IUnknown>,
+        notify_id: SystemNotificationWrapper,
+        data: Option<ComPtr<dyn IUnknown>>,
     ) {
+        let data = if let Some(data) = data { data } else { return };
+        let init = match notify_id.into_inner() {
+            Some(SystemNotification::ServiceAdded) => true,
+            Some(SystemNotification::ServiceRemoved) => false,
+            _ => return,
+        };
+
+        macro_rules! match_service {
+            ($( $service:ident: $interface:ident, )+) => {{
+                let mut ppv = MaybeUninit::uninit();
+                $(
+                    if data.query_interface(&<dyn $interface>::IID as *const _, ppv.as_mut_ptr()) == NOERROR {
+                        if init {
+                            $service.init(CORE.get().query_object());
+                        } else {
+                            $service.deinit();
+                        }
+                    } else
+                )+
+                {}
+            }};
+        }
+
+        match_service!(
+            THREADS: IAIMPServiceThreads,
+            CONNECTION_SETTINGS: IAIMPServiceConnectionSettings,
+            HTTP_CLIENT: IAIMPServiceHTTPClient2,
+            ACTION_MANAGER_SERVICE: IAIMPServiceActionManager,
+            FILE_FORMATS: IAIMPServiceFileFormats,
+            FILE_INFO_SERVICE: IAIMPServiceFileInfo,
+            FILE_INFO_FORMATTER: IAIMPServiceFileInfoFormatter,
+            FILE_INFO_FORMATTER_UTILS: IAIMPServiceFileInfoFormatterUtils,
+            FILE_STREAMING: IAIMPServiceFileStreaming,
+            FILE_URI_SERVICE: IAIMPServiceFileURI2,
+            FILE_SYSTEMS: IAIMPServiceFileSystems,
+        );
     }
 }
+
+impl<T> ComInterfaceQuerier for Wrapper<T> {}
 
 #[derive(Debug)]
 struct WrapperInfo {

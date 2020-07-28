@@ -1,7 +1,7 @@
-use crate::{error::HresultExt, util::Static};
+use crate::{error::HresultExt, util::Service};
 use iaimp::{
-    com_wrapper, ComPtr, ComRc, IAIMPServiceThreads, IAIMPTask, IAIMPTaskOwner, IAIMPTaskPriority,
-    ServiceThreadsFlags, TaskPriority,
+    com_wrapper, ComInterfaceQuerier, ComPtr, ComRc, IAIMPServiceThreads, IAIMPTask,
+    IAIMPTaskOwner, IAIMPTaskPriority, ServiceThreadsFlags, TaskPriority,
 };
 use std::{
     cell::RefCell,
@@ -16,7 +16,7 @@ use winapi::shared::{
     winerror::{E_FAIL, HRESULT, S_OK},
 };
 
-pub static THREADS: Static<Threads> = Static::new();
+pub static THREADS: Service<Threads> = Service::new();
 
 pub struct Threads {
     inner: ComPtr<dyn IAIMPServiceThreads>,
@@ -120,7 +120,7 @@ where
 
     fn new_raw(task: Task<T>) -> ComRc<dyn IAIMPTask> {
         let wrapper = TaskWrapper::new(task);
-        let wrapper = com_wrapper!(wrapper => TaskWrapper<T>: dyn IAIMPTask, dyn IAIMPTaskPriority);
+        let wrapper = com_wrapper!(wrapper => dyn IAIMPTask, dyn IAIMPTaskPriority);
         unsafe { wrapper.into_com_rc() }
     }
 }
@@ -152,6 +152,8 @@ impl<T> IAIMPTaskPriority for TaskWrapper<T> {
         self.inner.borrow().as_ref().unwrap().priority
     }
 }
+
+impl<T> ComInterfaceQuerier for TaskWrapper<T> {}
 
 /// A handle you get from [`ServiceThreads::spawn`](ServiceThreads::spawn)
 ///

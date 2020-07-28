@@ -1,22 +1,25 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
-use bitflags::bitflags;
 use std::{
     cell::Cell,
     fmt,
     marker::PhantomData,
     mem,
-    ops::Deref,
+    ops::{Deref, DerefMut},
     os::raw::{c_double, c_float, c_int, c_uchar, c_void},
     ptr,
     ptr::NonNull,
+    time::Duration,
 };
+
+use bitflags::bitflags;
+use std::time::SystemTime;
 use winapi::{
     shared::{
         basetsd::DWORD_PTR,
-        guiddef::{GUID as WinGUID, REFIID},
-        minwindef::{BOOL, DWORD, HMODULE},
+        guiddef::GUID as WinGUID,
+        minwindef::{BOOL, DWORD, HMODULE, WORD},
         windef::{HBITMAP, HDC, HWND, RECT, SIZE},
         winerror::{E_NOINTERFACE, HRESULT as WinHRESULT, NOERROR},
     },
@@ -24,13 +27,15 @@ use winapi::{
         oaidl::VARIANT,
         wingdi::RGBQUAD,
         winnt::{PWCHAR, WCHAR},
+        winuser::*,
     },
-};
+}; // keys
 
 // COM code based on https://github.com/microsoft/com-rs
 
 pub struct GUID(WinGUID);
 pub type IID = GUID;
+pub type REFIID = *const IID;
 
 impl PartialEq for GUID {
     fn eq(&self, other: &Self) -> bool {
@@ -38,6 +43,16 @@ impl PartialEq for GUID {
             && self.0.Data2 == other.0.Data2
             && self.0.Data3 == other.0.Data3
             && self.0.Data4 == other.0.Data4
+    }
+}
+
+impl Eq for GUID {}
+
+impl Deref for GUID {
+    type Target = WinGUID;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -50,6 +65,10 @@ pub trait ComInterface {
         riid == &Self::IID
             || (Self::IID != <dyn IUnknown as ComInterface>::IID
                 && <Self::Super as ComInterface>::check_inheritance_chain(riid))
+    }
+
+    fn check_inheritance_chain_by_ref(&self, riid: &IID) -> bool {
+        Self::check_inheritance_chain(riid)
     }
 }
 
@@ -90,21 +109,39 @@ impl<T: ComInterface + ?Sized> PartialEq for ComPtr<T> {
 
 impl<T: ComInterface + ?Sized> Eq for ComPtr<T> {}
 
-pub struct ComRc<T: ComInterface + ?Sized>(ComPtr<T>);
-
-impl<T: ComInterface + ?Sized> fmt::Debug for ComRc<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
-    }
+impl<T: ComInterface + ?Sized> ComInterface for ComPtr<T> {
+    const IID: IID = T::IID;
+    type Super = T::Super;
+    type VTable = T::VTable;
 }
 
+pub struct ComRc<T: ComInterface + ?Sized>(ComPtr<T>);
+
 impl<T: ComInterface + ?Sized> ComRc<T> {
+    pub fn from_ptr(ptr: *mut *mut T::VTable) -> Self {
+        Self(ComPtr::from_ptr(ptr))
+    }
+
     pub unsafe fn cast<U: ComInterface + ?Sized>(self) -> ComRc<U> {
         mem::transmute(self)
     }
 
     pub fn as_raw(&self) -> ComPtr<T> {
         self.0.clone()
+    }
+}
+
+impl<T: ComInterface + ?Sized> PartialEq for ComRc<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: ComInterface + ?Sized> Eq for ComRc<T> {}
+
+impl<T: ComInterface + ?Sized> fmt::Debug for ComRc<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
     }
 }
 
@@ -126,6 +163,18 @@ impl<T: ComInterface + ?Sized> Drop for ComRc<T> {
     }
 }
 
+impl<T: ComInterface + ?Sized> ComInterface for ComRc<T> {
+    const IID: IID = T::IID;
+    type Super = T::Super;
+    type VTable = T::VTable;
+}
+
+impl<T: ComInterface + ?Sized> From<ComPtr<T>> for ComRc<T> {
+    fn from(ptr: ComPtr<T>) -> Self {
+        Self(ptr)
+    }
+}
+
 pub trait ComProdInterface<T, P, O> {
     type VTable;
 
@@ -140,17 +189,23 @@ pub trait ComOffset {
     const VALUE: usize;
 }
 
-pub struct ZeroOffset;
+macro_rules! com_offset {
+    ($name:ident = $value:tt) => {
+        pub struct $name;
 
-impl ComOffset for ZeroOffset {
-    const VALUE: usize = 0;
+        impl ComOffset for $name {
+            const VALUE: usize = $value;
+        }
+    };
 }
 
-pub struct OneOffset;
-
-impl ComOffset for OneOffset {
-    const VALUE: usize = 1;
-}
+com_offset!(ZeroOffset = 0);
+com_offset!(OneOffset = 1);
+com_offset!(TwoOffset = 2);
+com_offset!(ThreeOffset = 3);
+com_offset!(FourOffset = 4);
+com_offset!(FiveOffset = 5);
+com_offset!(SixOffset = 6);
 
 pub trait ComPointers: fmt::Debug + Sized {
     fn query_interface(&self, riid: &IID) -> Option<*mut c_void>;
@@ -158,8 +213,12 @@ pub trait ComPointers: fmt::Debug + Sized {
     fn dealloc(&self);
 }
 
+pub trait ComPointersAlloc<Type>: ComPointers {
+    fn alloc() -> Self;
+}
+
 macro_rules! com_pointers {
-    ($( $fields:tt: $generics:ident ),+) => {
+    ($( $fields:tt: $generics:ident => $offset:ident ),+) => {
         impl<$( $generics: ComVTable ),+> ComPointers for ($( *mut $generics, )+) {
             fn query_interface(&self, riid: &IID) -> Option<*mut c_void> {
                 if <dyn IUnknown as ComInterface>::IID == *riid {
@@ -180,11 +239,30 @@ macro_rules! com_pointers {
                 )+
             }
         }
+
+        impl<Type, $( $generics ),+> ComPointersAlloc<Type> for ($( *mut $generics, )+)
+        where
+            $( $generics: ComVTable, )+
+            $( $generics::Interface: ComProdInterface<Type, Self, $offset>, )+
+        {
+            fn alloc() -> Self {
+                (
+                    $(
+                        Box::into_raw(Box::new(<$generics::Interface as $crate::ComProdInterface<Type, Self, $offset>>::new_vtable())) as *mut _,
+                    )+
+                )
+            }
+        }
     };
 }
 
-com_pointers!(0: T);
-com_pointers!(0: T, 1: U);
+com_pointers!(0: T => ZeroOffset);
+com_pointers!(0: T => ZeroOffset, 1: U => OneOffset);
+com_pointers!(0: A => ZeroOffset, 1: B => OneOffset, 2: C => TwoOffset);
+com_pointers!(0: A => ZeroOffset, 1: B => OneOffset, 2: C => TwoOffset, 3: D => ThreeOffset);
+com_pointers!(0: A => ZeroOffset, 1: B => OneOffset, 2: C => TwoOffset, 3: D => ThreeOffset, 4: E => FourOffset);
+com_pointers!(0: A => ZeroOffset, 1: B => OneOffset, 2: C => TwoOffset, 3: D => ThreeOffset, 4: E => FourOffset, 5: F => FiveOffset);
+com_pointers!(0: A => ZeroOffset, 1: B => OneOffset, 2: C => TwoOffset, 3: D => ThreeOffset, 4: E => FourOffset, 5: F => FiveOffset, 6: G => SixOffset);
 
 #[repr(C)]
 pub struct ComWrapper<T, U> {
@@ -193,10 +271,14 @@ pub struct ComWrapper<T, U> {
     inner: T,
 }
 
-impl<T, U: ComPointers> ComWrapper<T, U> {
-    pub fn new(inner: T, pointers: U) -> Self {
+impl<T, U> ComWrapper<T, U>
+where
+    T: ComInterfaceQuerier,
+    U: ComPointersAlloc<T>,
+{
+    pub fn new(inner: T) -> Self {
         Self {
-            pointers,
+            pointers: U::alloc(),
             counter: Cell::new(0),
             inner,
         }
@@ -209,10 +291,18 @@ impl<T, U: ComPointers> ComWrapper<T, U> {
     }
 }
 
-impl<T, U: ComPointers> IUnknown for ComWrapper<T, U> {
+impl<T, U> IUnknown for ComWrapper<T, U>
+where
+    T: ComInterfaceQuerier,
+    U: ComPointers,
+{
     unsafe fn query_interface(&self, riid: *const GUID, ppv: *mut *mut c_void) -> WinHRESULT {
         let riid = &*riid;
-        if let Some(ptr) = self.pointers.query_interface(riid) {
+        if let Some(ptr) = self
+            .pointers
+            .query_interface(riid)
+            .filter(|_| self.inner.query_interface(riid))
+        {
             *ppv = ptr;
         } else {
             *ppv = ptr::null_mut();
@@ -250,24 +340,19 @@ impl<T, U: fmt::Debug> fmt::Debug for ComWrapper<T, U> {
     }
 }
 
+pub trait ComInterfaceQuerier {
+    fn query_interface(&self, _riid: &IID) -> bool {
+        true
+    }
+}
+
 #[macro_export(local_inner_macros)]
 macro_rules! com_wrapper {
-    ($value:expr => $t:ty: $( $traits:ty ),+) => {{
+    ($value:expr => $( $traits:ty ),+) => {{
         type Pointers = ( $( *mut <$traits as $crate::ComInterface>::VTable, )+ );
-
-        let pointers = com_wrapper!(@alloc $t => $( $traits ),+);
-        let wrapper = $crate::ComWrapper::new($value, pointers);
+        let wrapper = $crate::ComWrapper::<_, Pointers>::new($value);
         wrapper
     }};
-    (@box $t:ty, $t1:ty, $offset:ty) => {
-        Box::into_raw(Box::new(<$t1 as $crate::ComProdInterface<$t, Pointers, $offset>>::new_vtable()))
-    };
-    (@alloc $t:ty => $t1:ty) => {
-        (com_wrapper!(@box $t, $t1, $crate::ZeroOffset),)
-    };
-    (@alloc $t:ty => $t1:ty, $t2:ty) => {
-        (com_wrapper!(@box $t, $t1, $crate::ZeroOffset), com_wrapper!(@box $t, $t2, $crate::OneOffset))
-    }
 }
 
 #[macro_export(local_inner_macros)]
@@ -375,7 +460,7 @@ macro_rules! com_trait {
 
         impl IUnknownVTable {
             $(
-                unsafe extern "stdcall" fn $func<T, U: ComPointers, O: ComOffset>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
+                unsafe extern "stdcall" fn $func<T: ComInterfaceQuerier, U: ComPointers, O: ComOffset>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
                     let this = this.sub(O::VALUE) as *mut ComWrapper<T, U>;
                     (*this).$func($( $arg_name ),*)
                 }
@@ -392,7 +477,7 @@ macro_rules! com_trait {
             }
         }
 
-        impl<T, U: ComPointers, O: ComOffset> ComProdInterface<T, U, O> for dyn IUnknown {
+        impl<T: ComInterfaceQuerier, U: ComPointers, O: ComOffset> ComProdInterface<T, U, O> for dyn IUnknown {
             type VTable = IUnknownVTable;
 
             fn new_vtable() -> Self::VTable {
@@ -404,7 +489,7 @@ macro_rules! com_trait {
 
         impl<T: ComInterface + ?Sized> IUnknown for ComPtr<T> {
             unsafe fn query_interface(&self, riid: *const GUID, ppv: *mut *mut c_void) -> i32 {
-                let vptr = std::dbg!(self.inner.as_ptr()) as *mut *const IUnknownVTable;
+                let vptr = self.inner.as_ptr() as *mut *const IUnknownVTable;
                 ((**vptr).query_interface)(vptr, riid, ppv)
             }
 
@@ -425,7 +510,7 @@ macro_rules! com_trait {
             $( unsafe fn $func:ident(&self, $( $arg_name:ident: $arg_ty:ty, )*) -> $ret:ty; )*
         }
     ) => {
-        impl<T: $trait_name, U> $trait_name for ComWrapper<T, U> {
+        impl<T: $trait_name + ComInterfaceQuerier, U> $trait_name for ComWrapper<T, U> {
             $(
                 unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret {
                     $trait_name::$func(&self.inner, $( $arg_name, )*)
@@ -453,7 +538,7 @@ macro_rules! com_trait {
 
             impl [< $trait_name VTable >] {
                 $(
-                    unsafe extern "stdcall" fn $func<T: $trait_name, U: ComPointers, O: ComOffset>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
+                    unsafe extern "stdcall" fn $func<T: $trait_name + ComInterfaceQuerier, U: ComPointers, O: ComOffset>(this: *mut *const Self, $( $arg_name: $arg_ty ),*) -> $ret {
                         let this = this.sub(O::VALUE) as *mut ComWrapper<T, U>;
                         $trait_name::$func(&*this, $( $arg_name ),*)
                     }
@@ -471,7 +556,7 @@ macro_rules! com_trait {
                 }
             }
 
-            impl<T: $trait_name, U: ComPointers, O: ComOffset> ComProdInterface<T, U, O> for dyn $trait_name {
+            impl<T: $trait_name + ComInterfaceQuerier, U: ComPointers, O: ComOffset> ComProdInterface<T, U, O> for dyn $trait_name {
                 type VTable = [< $trait_name VTable >];
 
                 fn new_vtable() -> Self::VTable {
@@ -489,7 +574,7 @@ macro_rules! com_trait {
 #[repr(transparent)]
 #[must_use]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct HRESULT(WinHRESULT);
+pub struct HRESULT(pub WinHRESULT);
 
 impl PartialEq<WinHRESULT> for HRESULT {
     fn eq(&self, other: &i32) -> bool {
@@ -565,6 +650,52 @@ com_trait! {
     }
 }
 
+// Delphi types
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+pub struct TDateTime(pub f64);
+
+impl TDateTime {
+    const UNIX_START_DATE: f64 = 25569.0;
+
+    pub fn unix_start() -> Self {
+        Self(Self::UNIX_START_DATE)
+    }
+}
+
+impl Deref for TDateTime {
+    type Target = f64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for TDateTime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+// conversions from: https://www.swissdelphicenter.ch/en/showcode.php?id=844
+impl From<TDateTime> for SystemTime {
+    fn from(date_time: TDateTime) -> Self {
+        SystemTime::UNIX_EPOCH
+            + Duration::from_secs((date_time.0 - TDateTime::UNIX_START_DATE).round() as u64 / 86400)
+    }
+}
+
+impl From<SystemTime> for TDateTime {
+    fn from(time: SystemTime) -> Self {
+        let secs = time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        Self((secs / 86400) as f64 + Self::UNIX_START_DATE)
+    }
+}
+
 // Base interfaces
 
 com_trait! {
@@ -618,7 +749,7 @@ com_trait! {
         unsafe fn system_notification(
             &self,
             notify_id: SystemNotificationWrapper,
-            data: ComPtr<dyn IUnknown>,
+            data: Option<ComPtr<dyn IUnknown>>,
         ) -> ();
     }
 }
@@ -939,7 +1070,7 @@ com_trait! {
 
         unsafe fn get_count(&self,) -> c_int;
 
-        unsafe fn get_object(&self, index: c_int, iid: REFIID, obj: *mut *mut c_void,) -> HRESULT;
+        unsafe fn get_object(&self, index: c_int, iid: REFIID, obj: *mut ComRc<dyn IUnknown>,) -> HRESULT;
 
         unsafe fn set_object(&self, index: c_int, obj: ComRc<dyn IUnknown>,) -> HRESULT;
     }
@@ -949,7 +1080,7 @@ com_trait! {
     pub trait IAIMPProgressCallback: IUnknown {
         const IID = {0x41494D50, 0x5072, 0x6F67, 0x72, 0x65, 0x73, 0x73, 0x43, 0x42, 0x00, 0x00};
 
-        unsafe fn process(&self, progress: c_float, canceled: *mut bool,) -> HRESULT;
+        unsafe fn process(&self, progress: c_float, canceled: *mut bool,) -> ();
     }
 }
 
@@ -1346,10 +1477,659 @@ com_trait! {
     }
 }
 
+// File Manager
+
+com_trait! {
+    pub trait IAIMPFileInfo: IAIMPPropertyList {
+        const IID = {0x41494D50, 0x4669, 0x6C65, 0x49, 0x6E, 0x66, 0x6F, 0x00, 0x00, 0x00, 0x00};
+
+        unsafe fn assign(&self, source: ComPtr<dyn IAIMPFileInfo>,) -> HRESULT;
+
+        unsafe fn clone(&self, info: *mut ComRc<dyn IAIMPFileInfo>,) -> HRESULT;
+    }
+}
+
+#[repr(i32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FileInfoProp {
+    Custom,
+    Album,
+    AlbumArt,
+    AlbumArtist,
+    AlbumGain,
+    AlbumPeak,
+    Artist,
+    BitRate,
+    Bpm,
+    Channels,
+    Comment,
+    Composer,
+    Copyright,
+    CueSheet,
+    Date,
+    DiskNumber,
+    DiskTotal,
+    Duration,
+    Filename,
+    FileSize,
+    Genre,
+    Lyrics,
+    Publisher = 23,
+    SampleRate,
+    Title,
+    TrackGain,
+    TrackNumber,
+    TrackPeak,
+    TrackTotal,
+    Url,
+    BitDepth,
+    Codec,
+    Conductor,
+    Mood,
+    Catalog,
+    Isrc,
+    Lyricist,
+    EncodeBy,
+    Rating,
+    StatAddingDate,
+    StatLastPlayDate,
+    StatMark,
+    StatPlayCount,
+    StatRating,
+    StatDisplayingMark = 22,
+}
+
+com_trait! {
+    pub trait IAIMPVirtualFile: IAIMPPropertyList {
+        const IID = {0x41494D50, 0x5669, 0x7274, 0x75, 0x61, 0x6C, 0x46, 0x69, 0x6C, 0x65, 0x00};
+
+        unsafe fn create_stream(&self, stream: *mut ComRc<dyn IAIMPStream>,) -> HRESULT;
+
+        unsafe fn get_file_info(&self, info: ComPtr<dyn IAIMPFileInfo>,) -> HRESULT;
+
+        unsafe fn is_exists(&self,) -> HRESULT;
+
+        unsafe fn is_in_same_stream(&self, virtual_file: ComPtr<dyn IAIMPVirtualFile>,) -> HRESULT;
+
+        unsafe fn synchronize(&self,) -> HRESULT;
+    }
+}
+
+#[repr(i32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum VirtualFileProp {
+    FileUri,
+    AudioSourceFile,
+    ClipStart,
+    ClipFinish,
+    IndexInSet,
+    FileFormat,
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileFormats: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x69, 0x6C, 0x65, 0x46, 0x6D, 0x74, 0x73, 0x00};
+
+        unsafe fn get_formats(&self, flags: FileFormatsCategory, s: *mut ComRc<dyn IAIMPString>,) -> HRESULT;
+
+        unsafe fn is_supported(&self, file_name: ComRc<dyn IAIMPString>, flags: FileFormatsCategory,) -> HRESULT;
+    }
+}
+
+bitflags! {
+    pub struct FileFormatsCategory: DWORD {
+        const AUDIO = 1;
+        const PLAYLISTS = 2;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileInfo: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x69, 0x6C, 0x65, 0x49, 0x6E, 0x66, 0x6F, 0x00};
+
+        unsafe fn get_file_info_from_file_uri(
+            &self,
+            file_uri: ComRc<dyn IAIMPString>,
+            flags: FileInfoFlags,
+            info: ComPtr<dyn IAIMPFileInfo>,
+        ) -> HRESULT;
+
+        unsafe fn get_file_info_from_stream(
+            &self,
+            stream: ComRc<dyn IAIMPStream>,
+            flags: FileInfoFlags,
+            info: ComPtr<dyn IAIMPFileInfo>,
+        ) -> HRESULT;
+
+        unsafe fn get_virtual_file(&self, file_uri: ComRc<dyn IAIMPString>, flags: DWORD, info: *mut ComRc<dyn IAIMPVirtualFile>,) -> HRESULT;
+    }
+}
+
+bitflags! {
+    pub struct FileInfoFlags: DWORD {
+        const NONE = 0;
+        const DONT_USE_AUDIO_DECODERS = 1;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileInfoFormatter: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x6C, 0x49, 0x6E, 0x66, 0x46, 0x6D, 0x74, 0x00};
+
+        unsafe fn format(
+            &self,
+            template: ComRc<dyn IAIMPString>,
+            file_info: Option<ComRc<dyn IAIMPFileInfo>>,
+            reserved: c_int,
+            additional_info: Option<ComRc<dyn IUnknown>>,
+            formatted_result: *mut ComRc<dyn IAIMPString>,
+        ) -> HRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileInfoFormatterUtils: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x6C, 0x49, 0x6E, 0x66, 0x46, 0x6D, 0x74, 0x55};
+
+        unsafe fn show_macros_legend(&self, screen_target: RECT, reserved: c_int, events_handler: ComRc<dyn IUnknown>,) -> HRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileManager: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x69, 0x6C, 0x65, 0x4D, 0x61, 0x6E, 0x00, 0x00};
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileStreaming: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x69, 0x6C, 0x65, 0x53, 0x74, 0x72, 0x6D, 0x00};
+
+        unsafe fn create_stream_for_file(
+            &self,
+            file_name: ComRc<dyn IAIMPString>,
+            flags: FileStreamingFlags,
+            offset: i64,
+            size: i64,
+            stream: *mut ComRc<dyn IAIMPFileStream>,
+        ) -> HRESULT;
+
+        unsafe fn create_stream_for_file_uri(
+            &self,
+            file_uri: ComRc<dyn IAIMPString>,
+            virtual_file: *mut Option<ComRc<dyn IAIMPVirtualFile>>,
+            stream: *mut ComRc<dyn IAIMPFileStream>,
+        ) -> HRESULT;
+    }
+}
+
+bitflags! {
+    pub struct FileStreamingFlags: DWORD {
+        const READ = 0;
+        const CREATE_NEW = 1;
+        const READ_WRITE = 2;
+        const MAP_TO_MEMORY = 4;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileSystems: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+        unsafe fn get(&self, file_uri: ComPtr<dyn IAIMPString>, iid: REFIID, obj: *mut *mut c_void,) -> HRESULT;
+
+        unsafe fn get_default(&self, iid: REFIID, obj: *mut *mut c_void,) -> HRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPFileSystemCustomFileCommand: IUnknown {
+        const IID = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+        unsafe fn can_process(&self, file_name: ComRc<dyn IAIMPString>,) -> WinHRESULT;
+
+        unsafe fn process(&self, file_name: ComRc<dyn IAIMPString>,) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPFileSystemCommandCopyToClipboard: IUnknown {
+        const IID = {0x41465343, 0x6D64, 0x436F, 0x70, 0x79, 0x32, 0x43, 0x6C, 0x70, 0x62, 0x64};
+
+        unsafe fn copy_to_clipboard(&self, files: ComRc<dyn IAIMPObjectList>,) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPFileSystemCommandDelete: IAIMPFileSystemCustomFileCommand {
+        const IID = {0x41465343, 0x6D64, 0x4465, 0x6C, 0x65, 0x74, 0x65, 0x00, 0x00, 0x00, 0x00};
+    }
+}
+
+com_trait! {
+    pub trait IAIMPFileSystemCommandDropSource: IUnknown {
+        const IID = {0x41465343, 0x6D64, 0x4472, 0x6F, 0x70, 0x53, 0x72, 0x63, 0x00, 0x00, 0x00};
+
+        unsafe fn create_stream(
+            &self,
+            file_name: ComRc<dyn IAIMPString>,
+            stream: *mut ComRc<dyn IAIMPStream>,
+        ) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPFileSystemCommandFileInfo: IUnknown {
+        const IID = { 0x41494D50, 0x4578, 0x7446, 0x69, 0x6C, 0x65, 0x49, 0x6E, 0x66, 0x6F, 0x00};
+
+        unsafe fn get_file_attrs(&self, file_name: ComRc<dyn IAIMPString>, attrs: *mut TAIMPFileAttributes,) -> WinHRESULT;
+
+        unsafe fn get_file_size(&self, file_name: ComRc<dyn IAIMPString>, size: *mut i64,) -> WinHRESULT;
+
+        unsafe fn is_file_exists(&self, file_name: ComRc<dyn IAIMPString>,) -> WinHRESULT;
+    }
+}
+
+#[repr(packed(1))]
+pub struct TAIMPFileAttributes {
+    pub attributes: DWORD,
+    pub time_creation: TDateTime,
+    pub time_last_access: TDateTime,
+    pub time_last_write: TDateTime,
+    pub reserved0: i64,
+    pub reserved1: i64,
+    pub reserved2: i64,
+}
+
+com_trait! {
+    pub trait IAIMPFileSystemCommandOpenFileFolder: IAIMPFileSystemCustomFileCommand {
+        const IID = {0x41465343, 0x6D64, 0x4669, 0x6C, 0x65, 0x46, 0x6C, 0x64, 0x72, 0x00, 0x00};
+    }
+}
+
+com_trait! {
+    pub trait IAIMPFileSystemCommandStreaming: IUnknown {
+        const IID = {0x41465343, 0x6D64, 0x5374, 0x72, 0x65, 0x61, 0x6D, 0x69, 0x6E, 0x67, 0x00};
+
+        unsafe fn create_stream(
+            &self,
+            file_name: ComRc<dyn IAIMPString>,
+            flags: FileStreamingFlags,
+            offset: i64,
+            size: i64,
+            stream: *mut ComRc<dyn IAIMPStream>,
+        ) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileURI: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x69, 0x6C, 0x65, 0x55, 0x52, 0x49, 0x00, 0x00};
+
+        unsafe fn build(
+            &self,
+            container_file_name: ComRc<dyn IAIMPString>,
+            part_name: ComRc<dyn IAIMPString>,
+            file_name: *mut ComRc<dyn IAIMPString>,
+        ) -> HRESULT;
+
+        unsafe fn parse(
+            &self,
+            file_uri: ComRc<dyn IAIMPString>,
+            container_file_name: *mut ComRc<dyn IAIMPString>,
+            part_name: *mut Option<ComRc<dyn IAIMPString>>,
+        ) -> HRESULT;
+
+        unsafe fn change_file_ext(
+            &self,
+            file_uri: *mut ComPtr<dyn IAIMPString>,
+            new_ext: ComRc<dyn IAIMPString>,
+            flags: FileUriFlags,
+        ) -> HRESULT;
+
+        unsafe fn extract_file_ext(
+            &self,
+            file_uri: ComPtr<dyn IAIMPString>,
+            s: *mut ComRc<dyn IAIMPString>,
+            flags: FileUriFlags,
+        ) -> HRESULT;
+
+        unsafe fn extract_file_name(
+            &self,
+            file_uri: ComPtr<dyn IAIMPString>,
+            s: *mut ComRc<dyn IAIMPString>,
+        ) -> HRESULT;
+
+        unsafe fn extract_file_parent_dir_name(
+            &self,
+            file_uri: ComPtr<dyn IAIMPString>,
+            s: *mut ComRc<dyn IAIMPString>,
+        ) -> HRESULT;
+
+        unsafe fn extract_file_parent_name(
+            &self,
+            file_uri: ComPtr<dyn IAIMPString>,
+            s: *mut ComRc<dyn IAIMPString>,
+        ) -> HRESULT;
+
+        unsafe fn extract_file_path(
+            &self,
+            file_uri: ComPtr<dyn IAIMPString>,
+            s: *mut ComRc<dyn IAIMPString>,
+        ) -> HRESULT;
+
+        unsafe fn is_url(&self, file_uri: ComPtr<dyn IAIMPString>,) -> HRESULT;
+    }
+}
+
+bitflags! {
+    pub struct FileUriFlags: DWORD {
+        const NONE = 0;
+        const DOUBLE_EXTS = 1;
+        const PART_EXT = 2;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPServiceFileURI2: IAIMPServiceFileURI {
+        const IID = {0x41494D50, 0x5372, 0x7646, 0x69, 0x6C, 0x65, 0x55, 0x52, 0x49, 0x32, 0x00};
+
+        unsafe fn get_scheme(
+            &self,
+            file_uri: ComPtr<dyn IAIMPString>,
+            scheme: *mut ComRc<dyn IAIMPString>,
+        ) -> HRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPExtensionFileExpander: IUnknown {
+        const IID = {0x41494D50, 0x4578, 0x7446, 0x69, 0x6C, 0x65, 0x45, 0x78, 0x70, 0x64, 0x72};
+
+        unsafe fn expand(
+            &self,
+            file_name: ComRc<dyn IAIMPString>,
+            list: *mut ComRc<dyn IAIMPObjectList>,
+            progress_callback: Option<ComPtr<dyn IAIMPProgressCallback>>,
+        ) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPExtensionFileFormat: IUnknown {
+        const IID = {0x41494D50, 0x4578, 0x7446, 0x69, 0x6C, 0x65, 0x46, 0x6D, 0x74, 0x00, 0x00};
+
+        unsafe fn get_description(&self, s: *mut ComRc<dyn IAIMPString>,) -> WinHRESULT;
+
+        unsafe fn get_ext_list(&self, s: *mut ComRc<dyn IAIMPString>,) -> WinHRESULT;
+
+        unsafe fn get_flags(&self, s: *mut FileFormatsCategory,) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPExtensionFileInfoProvider: IUnknown {
+        const IID = {0x41494D50, 0x4578, 0x7446, 0x69, 0x6C, 0x65, 0x49, 0x6E, 0x66, 0x6F, 0x00};
+
+        unsafe fn get_file_info(&self, file_uri: ComRc<dyn IAIMPString>, info: ComRc<dyn IAIMPFileInfo>,) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPExtensionFileInfoProviderEx: IUnknown {
+        const IID = {0x41494D50, 0x4578, 0x7446, 0x69, 0x6C, 0x65, 0x49, 0x6E, 0x66, 0x6F, 0x45};
+
+        unsafe fn get_file_info(&self, stream: ComRc<dyn IAIMPStream>, info: ComRc<dyn IAIMPFileInfo>,) -> WinHRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPExtensionFileSystem: IAIMPPropertyList {
+        const IID = {0x41494D50, 0x4578, 0x7446, 0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    }
+}
+
+#[repr(i32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FileSystemProp {
+    Scheme = 1,
+    ReadOnly = 2,
+}
+
+// Actions
+
+com_trait! {
+    pub trait IAIMPServiceActionManager: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7641, 0x63, 0x74, 0x69, 0x6F, 0x6E, 0x4D, 0x61, 0x6E};
+
+        unsafe fn get_by_id(&self, id: ComRc<dyn IAIMPString>, action: *mut ComRc<dyn IAIMPAction>,) -> HRESULT;
+
+        unsafe fn make_hotkey(&self, modifiers: HotkeyModifier, key: Key,) -> c_int;
+    }
+}
+
+bitflags! {
+    pub struct HotkeyModifier: WORD {
+        const CTRL = 1;
+        const ALT = 2;
+        const SHIFT = 4;
+        const WIN = 8;
+    }
+}
+
+// from https://godoc.org/github.com/lxn/walk#Key
+#[repr(u16)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum Key {
+    LButton = VK_LBUTTON as u16,
+    RButton = VK_RBUTTON as u16,
+    Cancel = VK_CANCEL as u16,
+    MButton = VK_MBUTTON as u16,
+    XButton1 = VK_XBUTTON1 as u16,
+    XButton2 = VK_XBUTTON2 as u16,
+    Back = VK_BACK as u16,
+    Tab = VK_TAB as u16,
+    Clear = VK_CLEAR as u16,
+    Return = VK_RETURN as u16,
+    Shift = VK_SHIFT as u16,
+    Control = VK_CONTROL as u16,
+    Menu = VK_MENU as u16,
+    Pause = VK_PAUSE as u16,
+    Capital = VK_CAPITAL as u16,
+    KanaOrHangul = VK_KANA as u16,
+    Junja = VK_JUNJA as u16,
+    Final = VK_FINAL as u16,
+    HanjaOrKanji = VK_HANJA as u16,
+    Escape = VK_ESCAPE as u16,
+    Convert = VK_CONVERT as u16,
+    NonConvert = VK_NONCONVERT as u16,
+    Accept = VK_ACCEPT as u16,
+    ModeChange = VK_MODECHANGE as u16,
+    Space = VK_SPACE as u16,
+    Prior = VK_PRIOR as u16,
+    Next = VK_NEXT as u16,
+    End = VK_END as u16,
+    Home = VK_HOME as u16,
+    Left = VK_LEFT as u16,
+    Up = VK_UP as u16,
+    Right = VK_RIGHT as u16,
+    Down = VK_DOWN as u16,
+    Select = VK_SELECT as u16,
+    Print = VK_PRINT as u16,
+    Execute = VK_EXECUTE as u16,
+    Snapshot = VK_SNAPSHOT as u16,
+    Insert = VK_INSERT as u16,
+    Delete = VK_DELETE as u16,
+    Help = VK_HELP as u16,
+    Zero = 0x30,
+    One = 0x31,
+    Two = 0x32,
+    Three = 0x33,
+    Four = 0x34,
+    Five = 0x35,
+    Six = 0x36,
+    Seven = 0x37,
+    Eight = 0x38,
+    Nine = 0x39,
+    A = 0x41,
+    B = 0x42,
+    C = 0x43,
+    D = 0x44,
+    E = 0x45,
+    F = 0x46,
+    G = 0x47,
+    H = 0x48,
+    I = 0x49,
+    J = 0x4A,
+    K = 0x4B,
+    L = 0x4C,
+    M = 0x4D,
+    N = 0x4E,
+    O = 0x4F,
+    P = 0x50,
+    Q = 0x51,
+    R = 0x52,
+    S = 0x53,
+    T = 0x54,
+    U = 0x55,
+    V = 0x56,
+    W = 0x57,
+    X = 0x58,
+    Y = 0x59,
+    Z = 0x5A,
+    LWin = VK_LWIN as u16,
+    RWin = VK_RWIN as u16,
+    Apps = VK_APPS as u16,
+    Sleep = VK_SLEEP as u16,
+    Numpad0 = VK_NUMPAD0 as u16,
+    Numpad1 = VK_NUMPAD1 as u16,
+    Numpad2 = VK_NUMPAD2 as u16,
+    Numpad3 = VK_NUMPAD3 as u16,
+    Numpad4 = VK_NUMPAD4 as u16,
+    Numpad5 = VK_NUMPAD5 as u16,
+    Numpad6 = VK_NUMPAD6 as u16,
+    Numpad7 = VK_NUMPAD7 as u16,
+    Numpad8 = VK_NUMPAD8 as u16,
+    Numpad9 = VK_NUMPAD9 as u16,
+    Multiply = VK_MULTIPLY as u16,
+    Add = VK_ADD as u16,
+    Separator = VK_SEPARATOR as u16,
+    Subtract = VK_SUBTRACT as u16,
+    Decimal = VK_DECIMAL as u16,
+    Divide = VK_DIVIDE as u16,
+    F1 = VK_F1 as u16,
+    F2 = VK_F2 as u16,
+    F3 = VK_F3 as u16,
+    F4 = VK_F4 as u16,
+    F5 = VK_F5 as u16,
+    F6 = VK_F6 as u16,
+    F7 = VK_F7 as u16,
+    F8 = VK_F8 as u16,
+    F9 = VK_F9 as u16,
+    F10 = VK_F10 as u16,
+    F11 = VK_F11 as u16,
+    F12 = VK_F12 as u16,
+    F13 = VK_F13 as u16,
+    F14 = VK_F14 as u16,
+    F15 = VK_F15 as u16,
+    F16 = VK_F16 as u16,
+    F17 = VK_F17 as u16,
+    F18 = VK_F18 as u16,
+    F19 = VK_F19 as u16,
+    F20 = VK_F20 as u16,
+    F21 = VK_F21 as u16,
+    F22 = VK_F22 as u16,
+    F23 = VK_F23 as u16,
+    F24 = VK_F24 as u16,
+    Numlock = VK_NUMLOCK as u16,
+    Scroll = VK_SCROLL as u16,
+    LShift = VK_LSHIFT as u16,
+    RShift = VK_RSHIFT as u16,
+    LControl = VK_LCONTROL as u16,
+    RControl = VK_RCONTROL as u16,
+    LMenu = VK_LMENU as u16,
+    RMenu = VK_RMENU as u16,
+    BrowserBack = VK_BROWSER_BACK as u16,
+    BrowserForward = VK_BROWSER_FORWARD as u16,
+    BrowserRefresh = VK_BROWSER_REFRESH as u16,
+    BrowserStop = VK_BROWSER_STOP as u16,
+    BrowserSearch = VK_BROWSER_SEARCH as u16,
+    BrowserFavorites = VK_BROWSER_FAVORITES as u16,
+    BrowserHome = VK_BROWSER_HOME as u16,
+    VolumeMute = VK_VOLUME_MUTE as u16,
+    VolumeDown = VK_VOLUME_DOWN as u16,
+    VolumeUp = VK_VOLUME_UP as u16,
+    MediaNextTrack = VK_MEDIA_NEXT_TRACK as u16,
+    MediaPrevTrack = VK_MEDIA_PREV_TRACK as u16,
+    MediaStop = VK_MEDIA_STOP as u16,
+    MediaPlayPause = VK_MEDIA_PLAY_PAUSE as u16,
+    LaunchMail = VK_LAUNCH_MAIL as u16,
+    LaunchMediaSelect = VK_LAUNCH_MEDIA_SELECT as u16,
+    LaunchApp1 = VK_LAUNCH_APP1 as u16,
+    LaunchApp2 = VK_LAUNCH_APP2 as u16,
+    Oem1 = VK_OEM_1 as u16,
+    OemPlus = VK_OEM_PLUS as u16,
+    OemComma = VK_OEM_COMMA as u16,
+    OemMinus = VK_OEM_MINUS as u16,
+    OemPeriod = VK_OEM_PERIOD as u16,
+    Oem2 = VK_OEM_2 as u16,
+    Oem3 = VK_OEM_3 as u16,
+    Oem4 = VK_OEM_4 as u16,
+    Oem5 = VK_OEM_5 as u16,
+    Oem6 = VK_OEM_6 as u16,
+    Oem7 = VK_OEM_7 as u16,
+    Oem8 = VK_OEM_8 as u16,
+    Oem102 = VK_OEM_102 as u16,
+    ProcessKey = VK_PROCESSKEY as u16,
+    Packet = VK_PACKET as u16,
+    Attn = VK_ATTN as u16,
+    CRSel = VK_CRSEL as u16,
+    EXSel = VK_EXSEL as u16,
+    ErEOF = VK_EREOF as u16,
+    Play = VK_PLAY as u16,
+    Zoom = VK_ZOOM as u16,
+    NoName = VK_NONAME as u16,
+    PA1 = VK_PA1 as u16,
+    OemClear = VK_OEM_CLEAR as u16,
+}
+
+com_trait! {
+    pub trait IAIMPAction: IAIMPPropertyList {
+        const IID = {0x41494D50, 0x4163, 0x7469, 0x6F, 0x6E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    }
+}
+
+#[repr(i32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum ActionProp {
+    Custom,
+    Id,
+    Name,
+    GroupName,
+    Enabled,
+    DefaultLocalHotkey,
+    DefaultGlobalHotkey,
+    DefaultGlobalHotkey2,
+    Event,
+}
+
+com_trait! {
+    pub trait IAIMPActionEvent: IUnknown {
+        const IID = {0x41494D50, 0x4163, 0x7469, 0x6F, 0x6E, 0x45, 0x76, 0x65, 0x6E, 0x74, 0x00};
+
+        unsafe fn on_execute(&self, data: Option<ComPtr<dyn IUnknown>>,) -> ();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::mem::MaybeUninit;
+
+    use super::*;
 
     #[test]
     fn com_ptr_size() {
@@ -1392,6 +2172,8 @@ mod tests {
     impl B for Wrapper {
         unsafe fn b(&self) {}
     }
+
+    impl ComInterfaceQuerier for Wrapper {}
 
     #[test]
     fn check_inheritance_chain() {
@@ -1447,5 +2229,13 @@ mod tests {
             let b_iunknown = query_interface!(b, dyn IUnknown);
             assert_eq!(iunknown, b_iunknown);
         }
+    }
+
+    #[test]
+    fn tdatetime_conversions() {
+        let delphi_time = TDateTime::unix_start();
+        let time: SystemTime = delphi_time.into();
+        let other_delphi_time: TDateTime = time.into();
+        assert_eq!(delphi_time, other_delphi_time);
     }
 }

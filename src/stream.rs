@@ -1,6 +1,6 @@
-use crate::{core::CORE, error::HresultExt, AimpString, Error, ErrorKind, Result};
+use crate::{core::CORE, error::HresultExt, Error, ErrorKind, Result};
 use futures::io::SeekFrom;
-use iaimp::{ComInterface, ComRc, IAIMPFileStream, IAIMPMemoryStream, IAIMPStream, StreamSeekFrom};
+use iaimp::{ComInterface, ComRc, IAIMPMemoryStream, IAIMPStream, StreamSeekFrom};
 use std::{
     fmt, io,
     io::{Read, Seek, Write},
@@ -16,10 +16,10 @@ pub enum StreamError {
     Offset,
 }
 
-pub struct Stream<T: ComInterface + IAIMPStream + ?Sized>(pub(crate) ComRc<T>);
+pub struct Stream<T: ComInterface + IAIMPStream + ?Sized = dyn IAIMPStream>(pub(crate) ComRc<T>);
 
 impl<T: ComInterface + IAIMPStream + ?Sized> Stream<T> {
-    fn as_inner(&self) -> &ComRc<T> {
+    pub(crate) fn as_inner(&self) -> &ComRc<T> {
         &self.0
     }
 
@@ -92,59 +92,6 @@ impl<T: ComInterface + IAIMPStream + ?Sized> fmt::Debug for Stream<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
     }
-}
-
-#[derive(Debug)]
-pub struct FileStream(pub(crate) Stream<dyn IAIMPFileStream>);
-
-impl FileStream {
-    pub fn clipping(&self) -> Option<FileStreamClipping> {
-        unsafe {
-            let mut offset = MaybeUninit::uninit();
-            let mut size = MaybeUninit::uninit();
-            let res = self
-                .as_inner()
-                .get_clipping(offset.as_mut_ptr(), size.as_mut_ptr());
-            if res == E_FAIL {
-                None
-            } else {
-                res.into_result().unwrap();
-                let offset = offset.assume_init();
-                let size = size.assume_init();
-                Some(FileStreamClipping { offset, size })
-            }
-        }
-    }
-
-    pub fn file_name(&self) -> AimpString {
-        unsafe {
-            let mut s = MaybeUninit::uninit();
-            self.as_inner()
-                .get_file_name(s.as_mut_ptr())
-                .into_result()
-                .unwrap();
-            AimpString::from(s.assume_init())
-        }
-    }
-}
-
-impl Deref for FileStream {
-    type Target = Stream<dyn IAIMPFileStream>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for FileStream {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-pub struct FileStreamClipping {
-    pub offset: i64,
-    pub size: i64,
 }
 
 #[derive(Debug)]

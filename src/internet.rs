@@ -1,18 +1,25 @@
 pub use iaimp::ConnectionType;
 
-use crate::stream::FileStream;
 use crate::{
-    error::HresultExt, stream::MemoryStream, util::Static, AimpString, ErrorInfo, PropertyList,
+    error::HresultExt,
+    file::FileStream,
+    prop_list,
+    prop_list::{PropertyList, PropertyListAccessor},
+    stream::MemoryStream,
+    util::Service,
+    AimpString, ErrorInfo,
 };
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use http::{header::ToStrError, uri::InvalidUri, Request, Uri};
+use http::{
+    header::{ToStrError, CONTENT_LENGTH, CONTENT_TYPE},
+    uri::InvalidUri,
+    Request, Uri,
+};
 use iaimp::{
-    com_wrapper, ComPtr, ComRc, ConnectionSettingsProp, ConnectionTypeWrapper, HttpClientFlags,
-    HttpClientPriorityFlags, HttpClientRestFlags, HttpMethod, IAIMPErrorInfo,
-    IAIMPHTTPClientEvents, IAIMPHTTPClientEvents2, IAIMPServiceConnectionSettings,
-    IAIMPServiceHTTPClient2, IAIMPStream, IAIMPString,
+    com_wrapper, ComInterfaceQuerier, ComPtr, ComRc, ConnectionSettingsProp, ConnectionTypeWrapper,
+    HttpClientFlags, HttpClientPriorityFlags, HttpClientRestFlags, HttpMethod, IAIMPErrorInfo,
+    IAIMPHTTPClientEvents, IAIMPHTTPClientEvents2, IAIMPPropertyList,
+    IAIMPServiceConnectionSettings, IAIMPServiceHTTPClient2, IAIMPStream, IAIMPString,
 };
-use std::sync::mpsc::SyncSender;
 use std::{
     convert::TryFrom,
     io, mem,
@@ -20,96 +27,45 @@ use std::{
     os::raw::c_void,
     sync::{
         mpsc,
-        mpsc::{Receiver, Sender},
+        mpsc::{Receiver, Sender, SyncSender},
     },
 };
 use winapi::shared::minwindef::{BOOL, TRUE};
 
-pub static CONNECTION_SETTINGS: Static<ConnectionSettings> = Static::new();
-pub static HTTP_CLIENT: Static<HttpClient> = Static::new();
+pub static CONNECTION_SETTINGS: Service<ConnectionSettings> = Service::new();
+pub static HTTP_CLIENT: Service<HttpClient> = Service::new();
 
-pub struct ConnectionSettings(PropertyList);
+prop_list! {
+    list: ConnectionSettings(ComPtr<dyn IAIMPServiceConnectionSettings>),
+    prop: ConnectionSettingsProp,
+    guard: ConnectionSettingsGuard,
+    methods:
+    proxy_server(ProxyServer) -> AimpString,
+    proxy_port(ProxyPort) -> AimpString,
+    proxy_username(ProxyUsername) -> AimpString,
+    proxy_user_pass(ProxyUserPass) -> AimpString,
+    timeout(Timeout) -> i32,
+    user_agent(UserAgent) -> AimpString,
+    connection_type(ConnectionType) -> Option<ConnectionType>,
+}
 
-impl ConnectionSettings {
-    pub fn connection_type(&self) -> Option<ConnectionType> {
-        unsafe {
-            mem::transmute::<i32, ConnectionTypeWrapper>(
-                self.0.get(ConnectionSettingsProp::ConnectionType as i32),
-            )
-            .into_inner()
-        }
+impl<T: IAIMPPropertyList> PropertyListAccessor<T> for Option<ConnectionType> {
+    fn get(id: i32, list: &PropertyList<T>) -> Self {
+        let ty = i32::get(id, list);
+        let wrapper: ConnectionTypeWrapper = unsafe { mem::transmute(ty) };
+        wrapper.into_inner()
     }
 
-    pub fn set_connection_type(&mut self, kind: ConnectionType) {
-        self.0
-            .update()
-            .set(ConnectionSettingsProp::ConnectionType as i32, kind as i32);
-    }
-
-    pub fn proxy_server(&self) -> AimpString {
-        self.0.get(ConnectionSettingsProp::ProxyServer as i32)
-    }
-
-    pub fn set_proxy_server(&mut self, server: AimpString) {
-        self.0
-            .update()
-            .set(ConnectionSettingsProp::ProxyServer as i32, server);
-    }
-
-    pub fn proxy_port(&self) -> AimpString {
-        self.0.get(ConnectionSettingsProp::ProxyPort as i32)
-    }
-
-    pub fn set_proxy_port(&mut self, port: AimpString) {
-        self.0
-            .update()
-            .set(ConnectionSettingsProp::ProxyPort as i32, port);
-    }
-
-    pub fn proxy_username(&self) -> AimpString {
-        self.0.get(ConnectionSettingsProp::ProxyUsername as i32)
-    }
-
-    pub fn set_proxy_username(&mut self, username: AimpString) {
-        self.0
-            .update()
-            .set(ConnectionSettingsProp::ProxyUsername as i32, username);
-    }
-
-    pub fn proxy_user_pass(&self) -> AimpString {
-        self.0.get(ConnectionSettingsProp::ProxyUserPass as i32)
-    }
-
-    pub fn set_proxy_user_pass(&mut self, user_pass: AimpString) {
-        self.0
-            .update()
-            .set(ConnectionSettingsProp::ProxyUserPass as i32, user_pass);
-    }
-
-    pub fn timeout(&self) -> i32 {
-        self.0.get(ConnectionSettingsProp::Timeout as i32)
-    }
-
-    pub fn set_timeout(&mut self, timeout: i32) {
-        self.0
-            .update()
-            .set(ConnectionSettingsProp::Timeout as i32, timeout);
-    }
-
-    pub fn user_agent(&self) -> AimpString {
-        self.0.get(ConnectionSettingsProp::UserAgent as i32)
-    }
-
-    pub fn set_user_agent(&mut self, user_agent: AimpString) {
-        self.0
-            .update()
-            .set(ConnectionSettingsProp::UserAgent as i32, user_agent);
+    fn set(self, id: i32, list: &mut PropertyList<T>) {
+        self.map(|ty| ty as i32).set(id, list)
     }
 }
 
 impl From<ComPtr<dyn IAIMPServiceConnectionSettings>> for ConnectionSettings {
     fn from(ptr: ComPtr<dyn IAIMPServiceConnectionSettings>) -> Self {
-        Self(PropertyList::from(ptr))
+        Self {
+            prop_list: PropertyList::from(ptr),
+        }
     }
 }
 
@@ -251,7 +207,8 @@ where
             content_info: content_info.0,
             complete: complete.0,
         };
-        let events_handler = com_wrapper!(events_handler => EventsHandler: dyn IAIMPHTTPClientEvents, dyn IAIMPHTTPClientEvents2);
+        let events_handler =
+            com_wrapper!(events_handler => dyn IAIMPHTTPClientEvents, dyn IAIMPHTTPClientEvents2);
         let mut task_id = MaybeUninit::uninit();
 
         unsafe {
@@ -393,3 +350,5 @@ impl IAIMPHTTPClientEvents2 for EventsHandler {
         self.status.send(AimpString(header)).unwrap();
     }
 }
+
+impl ComInterfaceQuerier for EventsHandler {}
