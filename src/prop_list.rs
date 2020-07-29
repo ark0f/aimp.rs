@@ -24,23 +24,19 @@ impl IAIMPPropertyList for HashedPropertyList {
     }
 
     unsafe fn get_value_as_float(&self, property_id: i32, value: *mut f64) -> HRESULT {
-        let f = self
-            .floats
-            .remove(&property_id)
-            .map(|(_, v)| v)
-            .unwrap_or(0.0);
+        let f = self.floats.remove(&property_id).map_or(0.0, |(_, v)| v);
         *value = f;
         HRESULT(S_OK)
     }
 
     unsafe fn get_value_as_int32(&self, property_id: i32, value: *mut i32) -> HRESULT {
-        let i = self.i32s.remove(&property_id).map(|(_, v)| v).unwrap_or(0);
+        let i = self.i32s.remove(&property_id).map_or(0, |(_, v)| v);
         *value = i;
         HRESULT(S_OK)
     }
 
     unsafe fn get_value_as_int64(&self, property_id: i32, value: *mut i64) -> HRESULT {
-        let i = self.i64s.remove(&property_id).map(|(_, v)| v).unwrap_or(0);
+        let i = self.i64s.remove(&property_id).map_or(0, |(_, v)| v);
         *value = i;
         HRESULT(S_OK)
     }
@@ -59,11 +55,10 @@ impl IAIMPPropertyList for HashedPropertyList {
                 let mut ppv = MaybeUninit::uninit();
                 obj.query_interface(iid, ppv.as_mut_ptr()) == NOERROR
             })
-            .map(|obj| {
+            .map_or(E_INVALIDARG, |obj| {
                 *value = obj;
                 S_OK
-            })
-            .unwrap_or(E_INVALIDARG);
+            });
         HRESULT(res)
     }
 

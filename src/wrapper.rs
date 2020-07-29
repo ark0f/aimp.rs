@@ -49,8 +49,7 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
                 .info
                 .full_description
                 .as_ref()
-                .map(Vec::as_ptr)
-                .unwrap_or(ptr::null()),
+                .map_or(ptr::null(), Vec::as_ptr),
             _ => ptr::null(),
         };
         p as *mut _

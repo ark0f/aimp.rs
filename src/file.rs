@@ -1111,7 +1111,7 @@ impl ComInterfaceQuerier for FileSystem {
                 }
             };
             (opt $this:ident.$field:ident) => {
-                $this.$field.as_ref().map(|_| true).unwrap_or(false)
+                $this.$field.as_ref().map_or(false, |_| true)
             };
             (bool $this:ident.$field:ident) => {
                 $this.$field
@@ -1139,8 +1139,7 @@ macro_rules! delegate_call {
             .map(|command| {
                 command.$( $token )+
             })
-            .map(|res: Result<(), _>| res.ok().map(|()| S_OK).unwrap_or(E_FAIL))
-            .unwrap_or(E_NOTIMPL)
+            .map_or(E_NOTIMPL, |res: Result<(), _>| res.map_or(E_FAIL, |()| S_OK))
     };
 }
 
@@ -1516,10 +1515,7 @@ where
                 let uri = FileUri(AimpString(file_uri));
                 info.as_raw().cast::<dyn IUnknown>().add_ref();
                 let mut info = FileInfo::from(info);
-                provider
-                    .get(uri, info.update())
-                    .map(|()| S_OK)
-                    .unwrap_or(E_FAIL)
+                provider.get(uri, info.update()).map_or(E_FAIL, |()| S_OK)
             }
             FileInfoProviderWrapper::Stream(_) => S_OK,
         }
@@ -1544,8 +1540,7 @@ where
                 let mut info = FileInfo::from(info);
                 provider
                     .get(stream, info.update())
-                    .map(|()| S_OK)
-                    .unwrap_or(E_FAIL)
+                    .map_or(E_FAIL, |()| S_OK)
             }
         }
     }
