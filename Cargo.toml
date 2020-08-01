@@ -7,7 +7,7 @@ edition = "2018"
 [workspace]
 members = [
     "iaimp",
-    "examples/polygon",
+    "cargo-aimp",
 ]
 
 [dependencies]
