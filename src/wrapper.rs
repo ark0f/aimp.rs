@@ -1,3 +1,4 @@
+use crate::decoders::AUDIO_DECODERS;
 use crate::{
     actions::ACTION_MANAGER_SERVICE,
     core::CORE,
@@ -13,10 +14,11 @@ use crate::{
 };
 use iaimp::{
     ComInterface, ComInterfaceQuerier, ComPtr, IAIMPCore, IAIMPPlugin, IAIMPServiceActionManager,
-    IAIMPServiceConnectionSettings, IAIMPServiceFileFormats, IAIMPServiceFileInfo,
-    IAIMPServiceFileInfoFormatter, IAIMPServiceFileInfoFormatterUtils, IAIMPServiceFileStreaming,
-    IAIMPServiceFileSystems, IAIMPServiceFileURI2, IAIMPServiceHTTPClient2, IAIMPServiceThreads,
-    IUnknown, PluginCategory, PluginInfoWrapper, SystemNotification, SystemNotificationWrapper,
+    IAIMPServiceAudioDecoders, IAIMPServiceConnectionSettings, IAIMPServiceFileFormats,
+    IAIMPServiceFileInfo, IAIMPServiceFileInfoFormatter, IAIMPServiceFileInfoFormatterUtils,
+    IAIMPServiceFileStreaming, IAIMPServiceFileSystems, IAIMPServiceFileURI2,
+    IAIMPServiceHTTPClient2, IAIMPServiceThreads, IUnknown, PluginCategory, PluginInfoWrapper,
+    SystemNotification, SystemNotificationWrapper,
 };
 use std::{cell::Cell, mem::MaybeUninit, ptr};
 use winapi::{
@@ -74,6 +76,8 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
         FILE_STREAMING.init(core.query_object());
         FILE_URI_SERVICE.init(core.query_object());
         FILE_SYSTEMS.init(core.query_object());
+
+        AUDIO_DECODERS.init(core.query_object());
 
         match T::new() {
             Ok(plugin) => {
@@ -137,6 +141,7 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
             FILE_STREAMING: IAIMPServiceFileStreaming,
             FILE_URI_SERVICE: IAIMPServiceFileURI2,
             FILE_SYSTEMS: IAIMPServiceFileSystems,
+            AUDIO_DECODERS: IAIMPServiceAudioDecoders,
         );
     }
 }
@@ -160,7 +165,7 @@ impl WrapperInfo {
             author: info.author.to_wide_null(),
             short_description: info.short_description.to_wide_null(),
             full_description: info.full_description.map(ToWide::to_wide_null),
-            category: info.category,
+            category: (info.category)(),
         }
     }
 }

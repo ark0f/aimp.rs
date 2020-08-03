@@ -323,6 +323,8 @@ where
         let mut value = self.counter.get();
         value -= 1;
         self.counter.set(value);
+        // We will see panic because of integer overflow if release() called on *deleted* object
+        #[cfg(not(debug_assertions))]
         if value == 0 {
             self.pointers.dealloc();
             Box::from_raw(self as *const Self as *mut Self);
@@ -389,14 +391,6 @@ macro_rules! com_trait {
                 $( unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret; )*
             }
         );
-
-        impl<T: ComInterface + $trait_name + ?Sized> $trait_name for ComRc<T> {
-            $(
-                unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret {
-                    $trait_name::$func(&self.0, $( $arg_name, )*)
-                }
-            )*
-        }
 
         impl ComInterface for dyn $trait_name {
             const IID: IID = GUID(WinGUID {
@@ -503,6 +497,14 @@ macro_rules! com_trait {
                 ((**vptr).release)(vptr)
             }
         }
+
+        impl<T: ComInterface + ?Sized> IUnknown for ComRc<T> {
+            $(
+                unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret {
+                    IUnknown::$func(&self.0, $( $arg_name, )*)
+                }
+            )*
+        }
     };
     (
         @rest $trait_name:ident: $base:ident;
@@ -525,6 +527,14 @@ macro_rules! com_trait {
                         let vptr = self.inner.as_ptr() as *mut *const [< $trait_name VTable >];
                         ((**vptr).$func)(vptr, $( $arg_name, )*)
                     }
+                }
+            )*
+        }
+
+        impl<T: ComInterface + $trait_name + ?Sized> $trait_name for ComRc<T> {
+            $(
+                unsafe fn $func(&self, $( $arg_name: $arg_ty, )*) -> $ret {
+                    $trait_name::$func(&self.0, $( $arg_name, )*)
                 }
             )*
         }
@@ -766,14 +776,13 @@ issue_60553! {
     }
 }
 
-#[repr(u32)]
-#[non_exhaustive]
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum PluginCategory {
-    Addons = 0x1,
-    Decoders = 0x2,
-    Visuals = 0x4,
-    Dsp = 0x8,
+bitflags! {
+    pub struct PluginCategory: DWORD {
+        const ADDONS = 0x1;
+        const DECODERS = 0x2;
+        const VISUALS = 0x4;
+        const DSP = 0x8;
+    }
 }
 
 issue_60553! {
@@ -1658,7 +1667,7 @@ com_trait! {
 
         unsafe fn create_stream_for_file_uri(
             &self,
-            file_uri: ComRc<dyn IAIMPString>,
+            file_uri: ComPtr<dyn IAIMPString>,
             virtual_file: *mut Option<ComRc<dyn IAIMPVirtualFile>>,
             stream: *mut ComRc<dyn IAIMPFileStream>,
         ) -> HRESULT;
@@ -2125,6 +2134,145 @@ com_trait! {
     }
 }
 
+// Decoders
+
+com_trait! {
+    pub trait IAIMPServiceAudioDecoders: IUnknown {
+        const IID = {0x41494D50, 0x5372, 0x7641, 0x75, 0x64, 0x69, 0x6F, 0x44, 0x65, 0x63, 0x00};
+
+        unsafe fn create_decoder_for_stream(
+            &self,
+            stream: ComRc<dyn IAIMPStream>,
+            flags: DWORD,
+            error_info: Option<ComPtr<dyn IAIMPErrorInfo>>,
+            decoder: *mut ComRc<dyn IAIMPAudioDecoder>,
+        ) -> HRESULT;
+
+        unsafe fn create_decoder_for_file_uri(
+            &self,
+            file_uri: ComPtr<dyn IAIMPString>,
+            flags: DWORD,
+            error_info: Option<ComPtr<dyn IAIMPErrorInfo>>,
+            decoder: *mut ComRc<dyn IAIMPAudioDecoder>,
+        ) -> HRESULT;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPExtensionAudioDecoder: IUnknown {
+        const IID = {0x41494D50, 0x4578, 0x7441, 0x75, 0x64, 0x69, 0x6F, 0x44, 0x65, 0x63, 0x00};
+
+        unsafe fn create_decoder(
+            &self,
+            stream: ComRc<dyn IAIMPStream>,
+            flags: DecoderFlags,
+            error_info: ComPtr<dyn IAIMPErrorInfo>,
+            decoder: *mut ComRc<dyn IAIMPAudioDecoder>,
+        ) -> WinHRESULT;
+    }
+}
+
+bitflags! {
+    pub struct DecoderFlags: DWORD {
+        const NONE = 0;
+        const FORCE_CREATE_INSTANCE = 0x1000;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPExtensionAudioDecoderPriority: IUnknown {
+        const IID = {0x41494D50, 0x4578, 0x7444, 0x65, 0x63, 0x50, 0x72, 0x69, 0x6F, 0x72, 0x00};
+
+        unsafe fn get_priority(&self,) -> c_int;
+    }
+}
+
+com_trait! {
+    pub trait IAIMPAudioDecoder: IUnknown {
+        const IID = {0x41494D50, 0x4175, 0x6469, 0x6F, 0x44, 0x65, 0x63, 0x00, 0x00, 0x00, 0x00};
+
+        unsafe fn get_file_info(&self, file_info: ComPtr<dyn IAIMPFileInfo>,) -> BOOL;
+
+        unsafe fn get_stream_info(
+            &self,
+            sample_rate: *mut c_int,
+            channels: *mut c_int,
+            sample_format: *mut SampleFormat,
+        ) -> BOOL;
+
+        unsafe fn is_seekable(&self,) -> BOOL;
+
+        unsafe fn is_realtime_stream(&self,) -> BOOL;
+
+        unsafe fn get_available_data(&self,) -> i64;
+
+        unsafe fn get_size(&self,) -> i64;
+
+        unsafe fn get_position(&self,) -> i64;
+
+        unsafe fn set_position(&self, value: i64,) -> BOOL;
+
+        unsafe fn read(&self, buffer: *mut c_void, count: c_int,) -> c_int;
+    }
+}
+
+#[repr(i32)]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum SampleFormat {
+    EightBit = 1,
+    SixteenBit,
+    TwentyFourBit,
+    ThirtyTwoBit,
+    ThirtyTwoBitFloat,
+}
+
+com_trait! {
+    pub trait IAIMPAudioDecoderBufferingProgress: IUnknown {
+        const IID = {0x41494D50, 0x4175, 0x6469, 0x6F, 0x44, 0x65, 0x63, 0x42, 0x75, 0x66, 0x66};
+
+        unsafe fn get(&self, value: *mut BufferingProgress,) -> BOOL;
+    }
+}
+
+#[repr(transparent)]
+pub struct BufferingProgress(c_double);
+
+impl BufferingProgress {
+    pub fn new(value: c_double) -> Option<Self> {
+        if value >= 0.0 && value <= 1.0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+}
+
+com_trait! {
+    pub trait IAIMPAudioDecoderNotifications: IUnknown {
+        const IID = {0x41494D50, 0x4175, 0x6469, 0x6F, 0x44, 0x65, 0x63, 0x4E, 0x74, 0x66, 0x79};
+
+        unsafe fn listener_add(&self, listener: ComRc<dyn IAIMPAudioDecoderListener>,) -> ();
+
+        unsafe fn listener_remove(&self, listener: ComRc<dyn IAIMPAudioDecoderListener>,) -> ();
+    }
+}
+
+com_trait! {
+    pub trait IAIMPAudioDecoderListener: IUnknown {
+        const IID = {0x41494D50, 0x4175, 0x6469, 0x6F, 0x44, 0x65, 0x63, 0x4C, 0x73, 0x74, 0x00};
+
+        unsafe fn changed(&self, changes: DecoderChange,) -> ();
+    }
+}
+
+bitflags! {
+    pub struct DecoderChange: c_int {
+        const NONE = 0;
+        const INPUT_FORMAT = 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::MaybeUninit;
@@ -2177,7 +2325,7 @@ mod tests {
 
     #[test]
     fn check_inheritance_chain() {
-        let wrapper = com_wrapper!(Wrapper => Wrapper: dyn A, dyn B);
+        let wrapper = com_wrapper!(Wrapper => dyn A, dyn B);
         assert_eq!(
             wrapper
                 .pointers
@@ -2215,8 +2363,7 @@ mod tests {
         }
 
         unsafe {
-            let wrapper: ComRc<dyn IUnknown> =
-                com_wrapper!(Wrapper => Wrapper: dyn A, dyn B).into_com_rc();
+            let wrapper: ComRc<dyn IUnknown> = com_wrapper!(Wrapper => dyn A, dyn B).into_com_rc();
 
             let iunknown = query_interface!(wrapper, dyn IUnknown);
             let a = query_interface!(wrapper, dyn A);

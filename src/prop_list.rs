@@ -56,7 +56,7 @@ impl IAIMPPropertyList for HashedPropertyList {
                 obj.query_interface(iid, ppv.as_mut_ptr()) == NOERROR
             })
             .map_or(E_INVALIDARG, |obj| {
-                *value = obj;
+                value.write(obj);
                 S_OK
             });
         HRESULT(res)
@@ -278,7 +278,7 @@ macro_rules! prop_list {
         )?
     ) => {
         pub struct $name {
-            prop_list: $crate::prop_list::PropertyList<$interface>,
+            pub(crate) prop_list: $crate::prop_list::PropertyList<$interface>,
             $(
                 $(
                     $struct_field: $struct_ty,

@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod core;
+pub mod decoders;
 mod error;
 pub mod file;
 pub mod internet;
@@ -80,7 +81,7 @@ pub struct PluginInfo {
     pub author: &'static str,
     pub short_description: &'static str,
     pub full_description: Option<&'static str>,
-    pub category: PluginCategory,
+    pub category: fn() -> PluginCategory,
 }
 
 pub struct AimpString(pub ComRc<dyn IAIMPString>);

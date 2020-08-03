@@ -456,14 +456,14 @@ impl FileStreamingService {
 
     pub fn create_stream_for_file_uri(
         &self,
-        file_uri: FileUri,
+        file_uri: &FileUri,
     ) -> Result<(Option<VirtualFile>, FileStream)> {
         unsafe {
             let mut virtual_file = MaybeUninit::uninit();
             let mut stream = MaybeUninit::uninit();
             self.0
                 .create_stream_for_file_uri(
-                    (file_uri.0).0,
+                    (file_uri.0).0.as_raw(),
                     virtual_file.as_mut_ptr(),
                     stream.as_mut_ptr(),
                 )
@@ -487,21 +487,15 @@ pub struct FileStream(pub(crate) Stream<dyn IAIMPFileStream>);
 
 impl FileStream {
     pub fn open<T: Into<AimpString>>(file_name: T) -> Result<Self> {
-        FILE_STREAMING.get().create_stream_for_file(
-            file_name.into(),
-            None,
-            FileStreamingFlags::CREATE_NEW,
-        )
+        Self::options().open(file_name)
     }
 
     pub fn options() -> FileStreamingOptions {
         FileStreamingOptions::default()
     }
 
-    pub fn from_file_uri<T: Into<FileUri>>(file_uri: T) -> Result<(Option<VirtualFile>, Self)> {
-        FILE_STREAMING
-            .get()
-            .create_stream_for_file_uri(file_uri.into())
+    pub fn from_file_uri(file_uri: &FileUri) -> Result<(Option<VirtualFile>, Self)> {
+        FILE_STREAMING.get().create_stream_for_file_uri(file_uri)
     }
 
     pub fn clipping(&self) -> Option<FileClipping> {
@@ -531,6 +525,12 @@ impl FileStream {
                 .unwrap();
             AimpString::from(s.assume_init())
         }
+    }
+}
+
+impl From<FileStream> for Stream {
+    fn from(file_stream: FileStream) -> Self {
+        unsafe { Stream((file_stream.0).0.cast()) }
     }
 }
 
@@ -592,7 +592,7 @@ impl FileStreamingOptions {
         FILE_STREAMING.get().create_stream_for_file(
             file_name.into(),
             self.clipping,
-            self.flags.unwrap_or(FileStreamingFlags::CREATE_NEW),
+            self.flags.unwrap_or(FileStreamingFlags::READ),
         )
     }
 }
@@ -613,7 +613,7 @@ impl From<Range<i64>> for FileClipping {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct FileUri(AimpString);
+pub struct FileUri(pub(crate) AimpString);
 
 impl FileUri {
     pub fn new<T: Into<AimpString>>(uri: T) -> Option<Self> {
@@ -1172,7 +1172,7 @@ impl IAIMPFileSystemCommandDropSource for FileSystem {
         delegate_call!(self
             .drop_source
             .create_stream(AimpString(file_name))
-            .map(|s| *stream = s.0))
+            .map(|s| stream.write(s.0)))
     }
 }
 
@@ -1185,7 +1185,7 @@ impl IAIMPFileSystemCommandFileInfo for FileSystem {
         delegate_call!(self
             .file_info
             .file_attrs(AimpString(file_name))
-            .map(|a| *attrs = TAIMPFileAttributes {
+            .map(|a| attrs.write(TAIMPFileAttributes {
                 attributes: 0,
                 time_creation: a.created.into(),
                 time_last_access: a.last_accessed.into(),
@@ -1193,14 +1193,14 @@ impl IAIMPFileSystemCommandFileInfo for FileSystem {
                 reserved0: 0,
                 reserved1: 0,
                 reserved2: 0,
-            }))
+            })))
     }
 
     unsafe fn get_file_size(&self, file_name: ComRc<dyn IAIMPString>, size: *mut i64) -> HRESULT {
         delegate_call!(self
             .file_info
             .file_size(AimpString(file_name))
-            .map(|s| *size = s))
+            .map(|s| size.write(s)))
     }
 
     unsafe fn is_file_exists(&self, file_name: ComRc<dyn IAIMPString>) -> HRESULT {
@@ -1222,7 +1222,7 @@ impl IAIMPFileSystemCommandStreaming for FileSystem {
         delegate_call!(self
             .streaming
             .create_stream(AimpString(file_name), flags, FileClipping { offset, size })
-            .map(|s| *stream = s.0))
+            .map(|s| stream.write(s.0)))
     }
 }
 
@@ -1417,7 +1417,7 @@ where
             .0
             .expand(AimpString(file_name), callback.map(ProgressCallback));
         if let Ok(l) = res {
-            *list = l.inner.0;
+            list.write(l.inner.0);
             S_OK
         } else {
             E_FAIL
@@ -1448,12 +1448,12 @@ pub struct FileFormatWrapper<T>(pub T);
 
 impl<T: FileFormat> IAIMPExtensionFileFormat for FileFormatWrapper<T> {
     unsafe fn get_description(&self, s: *mut ComRc<dyn IAIMPString>) -> HRESULT {
-        *s = AimpString::from(T::DESCRIPTION).0;
+        s.write(AimpString::from(T::DESCRIPTION).0);
         S_OK
     }
 
     unsafe fn get_ext_list(&self, s: *mut ComRc<dyn IAIMPString>) -> HRESULT {
-        *s = AimpString::from(T::EXTS.join(";") + ";").0;
+        s.write(AimpString::from(T::EXTS.join(";") + ";").0);
         S_OK
     }
 
@@ -1513,7 +1513,7 @@ where
             FileInfoProviderWrapper::Uri(provider)
             | FileInfoProviderWrapper::UriAndStream(provider, _) => {
                 let uri = FileUri(AimpString(file_uri));
-                info.as_raw().cast::<dyn IUnknown>().add_ref();
+                info.add_ref();
                 let mut info = FileInfo::from(info);
                 provider.get(uri, info.update()).map_or(E_FAIL, |()| S_OK)
             }
@@ -1536,7 +1536,7 @@ where
             FileInfoProviderWrapper::Stream(provider)
             | FileInfoProviderWrapper::UriAndStream(_, provider) => {
                 let stream = Stream(stream);
-                info.as_raw().cast::<dyn IUnknown>().add_ref();
+                info.add_ref();
                 let mut info = FileInfo::from(info);
                 provider
                     .get(stream, info.update())
