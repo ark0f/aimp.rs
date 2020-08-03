@@ -10,6 +10,6 @@ anyhow = "1.0.32"
 thiserror = "1.0.20"
 structopt = "0.3.15"
 zip = "0.5.6"
-winapi = { version = "0.3.9", features = ["tlhelp32", "processthreadsapi", "synchapi"] }
+winapi = { version = "0.3.9", features = ["tlhelp32", "processthreadsapi", "synchapi", "handleapi"] }
 toml = "0.5.6"
 serde = { version = "1.0.114", features = ["derive"] }
