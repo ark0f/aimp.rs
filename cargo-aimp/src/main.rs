@@ -1,12 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cargo_metadata::{Artifact, Message, MetadataCommand};
+use serde::Deserialize;
+use std::process::exit;
 use std::{
     env,
     ffi::OsStr,
     fmt, fs,
     fs::File,
     io,
-    io::{BufRead, BufReader},
+    io::BufReader,
     mem,
     mem::MaybeUninit,
     ops::Deref,
@@ -32,6 +34,7 @@ use zip::{write::FileOptions, ZipWriter};
 
 const AIMP_DIR: &'static str = "C:/Program Files (x86)/AIMP";
 const AIMP_EXE: &'static str = "AIMP.exe";
+const AIMP_TOML: &'static str = "AIMP.toml";
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -96,6 +99,34 @@ struct Args {
     target_dir: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct Toml {
+    #[serde(default = "default_langs")]
+    langs: PathBuf,
+    #[serde(default)]
+    dlls: Vec<PathBuf>,
+    #[serde(default = "default_exe_dir")]
+    exe_dir: PathBuf,
+}
+
+impl Default for Toml {
+    fn default() -> Self {
+        Self {
+            langs: default_langs(),
+            dlls: vec![],
+            exe_dir: default_exe_dir(),
+        }
+    }
+}
+
+fn default_langs() -> PathBuf {
+    PathBuf::from("langs")
+}
+
+fn default_exe_dir() -> PathBuf {
+    PathBuf::from(AIMP_DIR)
+}
+
 fn get_package_name(package_flag: Option<String>) -> Result<String> {
     let metadata = MetadataCommand::new().no_deps().exec()?;
     let package = metadata
@@ -146,23 +177,25 @@ fn get_package_artifact(package: &str, mut child: Child) -> Result<Artifact> {
         .find_map(|msg| {
             msg.map(|msg| match msg {
                 Message::CompilerArtifact(artifact)
-                    if artifact.package_id.repr.starts_with(package) =>
+                    if artifact.package_id.repr.starts_with(package)
+                        && artifact.target.src_path.ends_with("lib.rs") =>
                 {
                     Some(artifact)
                 }
                 Message::CompilerMessage(msg) => {
-                    println!("{}", msg.to_string());
+                    println!("{}", msg);
                     None
                 }
                 _ => None,
             })
-            .map_or(None, |x| x)
+            .ok()
+            .flatten()
         })
         .unwrap();
     Ok(artifact)
 }
 
-fn pack(package: &str, filenames: Vec<PathBuf>) -> Result<()> {
+fn pack(package: &str, filenames: Vec<PathBuf>, toml: &Toml) -> Result<()> {
     let dll = filenames
         .into_iter()
         .find(|path| path.extension() == Some(OsStr::new("dll")))
@@ -171,14 +204,40 @@ fn pack(package: &str, filenames: Vec<PathBuf>) -> Result<()> {
     let mut zip = dll.clone();
     zip.set_extension("zip");
 
-    let mut dll = File::open(dll)?;
+    let mut dll_file = File::open(dll)?;
     let archive = File::create(zip)?;
     let mut archive = ZipWriter::new(archive);
 
-    let mut dll_in_zip = PathBuf::from(package).join(package);
-    dll_in_zip.set_extension("dll");
-    archive.start_file_from_path(dll_in_zip.as_path(), FileOptions::default())?;
-    io::copy(&mut dll, &mut archive)?;
+    let plugin_dir = PathBuf::from(package);
+
+    let mut dll = plugin_dir.join(package);
+    dll.set_extension("dll");
+    archive.start_file_from_path(dll.as_path(), FileOptions::default())?;
+    io::copy(&mut dll_file, &mut archive)?;
+
+    for dll in &toml.dlls {
+        let dll_name = dll.file_name().unwrap();
+
+        archive
+            .start_file_from_path(plugin_dir.join(dll_name).as_path(), FileOptions::default())?;
+        let mut dll_file = File::open(dll).context("Additional DLL for plugin")?;
+        io::copy(&mut dll_file, &mut archive)?;
+    }
+
+    if toml.langs.exists() {
+        let langs_dir = plugin_dir.join("Langs");
+        for lang in fs::read_dir(&toml.langs)? {
+            let lang = lang?.path();
+            let lang_file_name = lang.file_name().unwrap();
+
+            archive.start_file_from_path(
+                langs_dir.join(lang_file_name).as_path(),
+                FileOptions::default(),
+            )?;
+            let mut lang = File::open(lang)?;
+            io::copy(&mut lang, &mut archive)?;
+        }
+    }
 
     archive.finish()?;
 
@@ -239,9 +298,15 @@ unsafe fn kill_aimp() -> Result<()> {
 fn main() -> Result<()> {
     let args: Args = Args::from_args();
 
-    let aimp_dir = env::var("AIMP_DIR")
-        .ok()
-        .map_or_else(|| PathBuf::from(AIMP_DIR), PathBuf::from);
+    let toml = PathBuf::from(AIMP_TOML);
+    let toml = if toml.exists() {
+        let aimp = fs::read_to_string("Aimp.toml")?;
+        toml::from_str(&aimp)?
+    } else {
+        Toml::default()
+    };
+
+    let aimp_dir = &toml.exe_dir;
 
     let package = get_package_name(args.package)?;
     let child = cargo_build(&package, args.release, args.color, args.target_dir)?;
@@ -256,9 +321,9 @@ fn main() -> Result<()> {
         Err(Error::InvalidCrateType)?;
     }
 
-    pack(&package, artifact.filenames)?;
+    pack(&package, artifact.filenames, &toml)?;
 
-    if !args.release || !args.no_run {
+    if !args.release && !args.no_run {
         unsafe {
             kill_aimp()?;
         }
@@ -268,19 +333,17 @@ fn main() -> Result<()> {
             fs::remove_dir_all(plugin_dir)?;
         }
 
-        let aimp = Command::new(aimp_dir.join(AIMP_EXE))
+        let status = Command::new(aimp_dir.join(AIMP_EXE))
             .envs(env::vars())
-            .stdout(Stdio::piped())
-            .spawn()?;
-        let mut reader = BufReader::new(aimp.stdout.unwrap());
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if reader.read_line(&mut line)? == 0 {
-                break;
-            }
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .output()?
+            .status;
 
-            println!("{}", line);
+        if !status.success() {
+            if let Some(code) = status.code() {
+                exit(code);
+            }
         }
     }
 
