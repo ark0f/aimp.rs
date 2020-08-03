@@ -1,3 +1,4 @@
+pub use iaimp::FileFormatsCategory;
 pub use winapi::shared::windef::RECT as Rect;
 
 use crate::{
@@ -11,12 +12,12 @@ use crate::{
     AimpString, Error, List, ProgressCallback, Result, CORE,
 };
 use iaimp::{
-    com_wrapper, ComInterface, ComInterfaceQuerier, ComPtr, ComRc, FileFormatsCategory,
-    FileInfoFlags, FileInfoProp, FileStreamingFlags, FileSystemProp, FileUriFlags,
-    IAIMPActionEvent, IAIMPExtensionFileExpander, IAIMPExtensionFileFormat,
-    IAIMPExtensionFileInfoProvider, IAIMPExtensionFileInfoProviderEx, IAIMPExtensionFileSystem,
-    IAIMPFileInfo, IAIMPFileStream, IAIMPFileSystemCommandCopyToClipboard,
-    IAIMPFileSystemCommandDelete, IAIMPFileSystemCommandDropSource, IAIMPFileSystemCommandFileInfo,
+    com_wrapper, ComInterface, ComInterfaceQuerier, ComPtr, ComRc, FileInfoFlags, FileInfoProp,
+    FileStreamingFlags, FileSystemProp, FileUriFlags, IAIMPActionEvent, IAIMPExtensionFileExpander,
+    IAIMPExtensionFileFormat, IAIMPExtensionFileInfoProvider, IAIMPExtensionFileInfoProviderEx,
+    IAIMPExtensionFileSystem, IAIMPFileInfo, IAIMPFileStream,
+    IAIMPFileSystemCommandCopyToClipboard, IAIMPFileSystemCommandDelete,
+    IAIMPFileSystemCommandDropSource, IAIMPFileSystemCommandFileInfo,
     IAIMPFileSystemCommandOpenFileFolder, IAIMPFileSystemCommandStreaming,
     IAIMPFileSystemCustomFileCommand, IAIMPImage, IAIMPImageContainer, IAIMPObjectList,
     IAIMPProgressCallback, IAIMPServiceFileFormats, IAIMPServiceFileInfo,
