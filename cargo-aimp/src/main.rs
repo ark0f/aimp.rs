@@ -104,8 +104,6 @@ struct Toml {
     langs: PathBuf,
     #[serde(default)]
     dlls: Vec<PathBuf>,
-    #[serde(default = "default_exe_dir")]
-    exe_dir: PathBuf,
 }
 
 impl Default for Toml {
@@ -113,17 +111,12 @@ impl Default for Toml {
         Self {
             langs: default_langs(),
             dlls: vec![],
-            exe_dir: default_exe_dir(),
         }
     }
 }
 
 fn default_langs() -> PathBuf {
     PathBuf::from("langs")
-}
-
-fn default_exe_dir() -> PathBuf {
-    PathBuf::from(AIMP_DIR)
 }
 
 fn get_package_name(package_flag: Option<String>) -> Result<String> {
@@ -313,7 +306,7 @@ fn main() -> Result<()> {
         Toml::default()
     };
 
-    let aimp_dir = &toml.exe_dir;
+    let aimp_dir = env::var("AIMP_DIR").map_or_else(|_| PathBuf::from(AIMP_DIR), PathBuf::from);
 
     let package = get_package_name(args.package)?;
     let child = cargo_build(&package, args.release, args.color, args.target_dir)?;
