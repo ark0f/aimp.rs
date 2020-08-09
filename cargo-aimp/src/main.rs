@@ -31,7 +31,7 @@ use winapi::{
 };
 use zip::{write::FileOptions, ZipWriter};
 
-const AIMP_DIR: &str = "C:/Program Files (x86)/AIMP";
+const AIMP_ROOT_DIR: &str = "C:/Program Files (x86)/AIMP";
 const AIMP_EXE: &str = "AIMP.exe";
 const AIMP_TOML: &str = "AIMP.toml";
 
@@ -306,7 +306,8 @@ fn main() -> Result<()> {
         Toml::default()
     };
 
-    let aimp_dir = env::var("AIMP_DIR").map_or_else(|_| PathBuf::from(AIMP_DIR), PathBuf::from);
+    let aimp_root_dir =
+        env::var("AIMP_ROOT_DIR").map_or_else(|_| PathBuf::from(AIMP_ROOT_DIR), PathBuf::from);
 
     let package = get_package_name(args.package)?;
     let child = cargo_build(&package, args.release, args.color, args.target_dir)?;
@@ -339,7 +340,7 @@ fn main() -> Result<()> {
             find_aimp()?.map(|process| kill_aimp(process)).transpose()?;
         }
 
-        let plugins_dir = aimp_dir.join("Plugins");
+        let plugins_dir = aimp_root_dir.join("Plugins");
 
         let plugin_dir = plugins_dir.join(&package);
         if plugin_dir.exists() {
@@ -350,7 +351,7 @@ fn main() -> Result<()> {
         let fs = RealFs(plugins_dir);
         pack(fs, &package, dll, &toml)?;
 
-        let status = Command::new(aimp_dir.join(AIMP_EXE))
+        let status = Command::new(aimp_root_dir.join(AIMP_EXE))
             .envs(env::vars())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
