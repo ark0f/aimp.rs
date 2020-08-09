@@ -306,8 +306,8 @@ fn main() -> Result<()> {
         Toml::default()
     };
 
-    let aimp_root_dir =
-        env::var("AIMP_ROOT_DIR").map_or_else(|_| PathBuf::from(AIMP_ROOT_DIR), PathBuf::from);
+    let aimp_root_dir = env::var("CARGO_AIMP_PLAYER_ROOT_DIR")
+        .map_or_else(|_| PathBuf::from(AIMP_ROOT_DIR), PathBuf::from);
 
     let package = get_package_name(args.package)?;
     let child = cargo_build(&package, args.release, args.color, args.target_dir)?;
