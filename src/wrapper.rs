@@ -1,7 +1,7 @@
-use crate::decoders::AUDIO_DECODERS;
 use crate::{
     actions::ACTION_MANAGER_SERVICE,
     core::CORE,
+    decoders::AUDIO_DECODERS,
     file::{
         FILE_FORMATS, FILE_INFO_FORMATTER, FILE_INFO_FORMATTER_UTILS, FILE_INFO_SERVICE,
         FILE_STREAMING, FILE_SYSTEMS, FILE_URI_SERVICE,

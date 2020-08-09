@@ -32,7 +32,7 @@ pub(crate) trait ToWide {
 
 impl ToWide for str {
     fn to_wide(&self) -> Vec<u16> {
-        OsStr::new(self).encode_wide().chain(Some(0)).collect()
+        OsStr::new(self).encode_wide().collect()
     }
 
     fn to_wide_null(&self) -> Vec<u16> {

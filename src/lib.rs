@@ -53,7 +53,7 @@ macro_rules! main {
 
             type Wrapper = $crate::macro_export::Wrapper::<$entry>;
 
-            std::panic::set_hook(Box::new(|info| msg_box!("{}", info)));
+            std::panic::set_hook(Box::new(|info| $crate::macro_export::message_box(info.to_string())));
 
             let wrapper = $crate::macro_export::com_wrapper!(
                 Wrapper::new() => $crate::macro_export::IAIMPPlugin

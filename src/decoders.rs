@@ -1,27 +1,24 @@
-pub use iaimp::BufferingProgress;
-pub use iaimp::DecoderChange;
-pub use iaimp::SampleFormat;
+pub use iaimp::{BufferingProgress, DecoderChange, SampleFormat};
 
-use crate::core::Extension;
-use crate::error::HresultExt;
-use crate::file::{FileInfo, FileUri};
-use crate::stream::Stream;
-use crate::util::Service;
-use crate::AimpString;
-use crate::Result;
-use crate::{ErrorInfo, ErrorInfoContent};
+use crate::{
+    core::Extension,
+    error::HresultExt,
+    file::{FileInfo, FileUri},
+    stream::Stream,
+    util::Service,
+    AimpString, ErrorInfo, ErrorInfoContent, Result,
+};
 use iaimp::{
     com_wrapper, ComInterface, ComInterfaceQuerier, ComPtr, ComRc, DecoderFlags, IAIMPAudioDecoder,
     IAIMPAudioDecoderBufferingProgress, IAIMPAudioDecoderListener, IAIMPAudioDecoderNotifications,
     IAIMPErrorInfo, IAIMPExtensionAudioDecoder, IAIMPExtensionAudioDecoderPriority, IAIMPFileInfo,
     IAIMPServiceAudioDecoders, IAIMPStream, IUnknown, IID,
 };
-use std::cell::Cell;
-use std::mem::MaybeUninit;
-use std::{io, mem, slice};
-use winapi::_core::ffi::c_void;
-use winapi::shared::minwindef::{BOOL, FALSE, TRUE};
-use winapi::shared::winerror::{E_FAIL, E_PENDING, HRESULT, S_OK};
+use std::{cell::Cell, io, mem, mem::MaybeUninit, os::raw::c_void, slice};
+use winapi::shared::{
+    minwindef::{BOOL, FALSE, TRUE},
+    winerror::{E_FAIL, E_PENDING, HRESULT, S_OK},
+};
 
 pub(crate) static AUDIO_DECODERS: Service<AudioDecoders> = Service::new();
 
