@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use cargo_metadata::{Artifact, Message, MetadataCommand};
 use serde::Deserialize;
-use std::process::exit;
 use std::{
     env,
     ffi::OsStr,
@@ -14,12 +13,12 @@ use std::{
     ops::Deref,
     os::raw::c_void,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{exit, Child, Command, Stdio},
+    str::FromStr,
 };
 use structopt::StructOpt;
-use winapi::_core::str::FromStr;
 use winapi::{
-    shared::minwindef::{FALSE, MAX_PATH},
+    shared::minwindef::{DWORD, FALSE, MAX_PATH},
     um::{
         handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
         processthreadsapi::{OpenProcess, TerminateProcess},
@@ -32,22 +31,22 @@ use winapi::{
 };
 use zip::{write::FileOptions, ZipWriter};
 
-const AIMP_DIR: &'static str = "C:/Program Files (x86)/AIMP";
-const AIMP_EXE: &'static str = "AIMP.exe";
-const AIMP_TOML: &'static str = "AIMP.toml";
+const AIMP_DIR: &str = "C:/Program Files (x86)/AIMP";
+const AIMP_EXE: &str = "AIMP.exe";
+const AIMP_TOML: &str = "AIMP.toml";
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("cdylib crate type is required")]
     InvalidCrateType,
-    #[error("Failed to create toolhelp snapshot")]
-    ToolhelpSnapshot,
-    #[error("Process32First failed")]
-    Process32First,
-    #[error("Failed to open process")]
-    OpenProcess,
     #[error("Color option is invalid")]
     InvalidColorOption,
+    #[error("Failed to create toolhelp snapshot: {0}")]
+    ToolhelpSnapshot(io::Error),
+    #[error("Process32First failed: {0}")]
+    Process32First(io::Error),
+    #[error("Failed to open process: {0}")]
+    OpenProcess(io::Error),
 }
 
 #[derive(Debug)]
@@ -195,33 +194,43 @@ fn get_package_artifact(package: &str, mut child: Child) -> Result<Artifact> {
     Ok(artifact)
 }
 
-fn pack(package: &str, filenames: Vec<PathBuf>, toml: &Toml) -> Result<()> {
-    let dll = filenames
-        .into_iter()
-        .find(|path| path.extension() == Some(OsStr::new("dll")))
-        .unwrap();
+trait FileSystem: Sized {
+    fn create_file(&mut self, path: PathBuf, file: File) -> Result<()>;
+}
 
-    let mut zip = dll.clone();
-    zip.set_extension("zip");
+struct ArchiveFs(ZipWriter<File>);
 
-    let mut dll_file = File::open(dll)?;
-    let archive = File::create(zip)?;
-    let mut archive = ZipWriter::new(archive);
+impl FileSystem for ArchiveFs {
+    fn create_file(&mut self, path: PathBuf, mut file: File) -> Result<()> {
+        self.0
+            .start_file_from_path(path.as_path(), FileOptions::default())?;
+        io::copy(&mut file, &mut self.0)?;
+        Ok(())
+    }
+}
 
+struct RealFs(PathBuf);
+
+impl FileSystem for RealFs {
+    fn create_file(&mut self, path: PathBuf, mut file: File) -> Result<()> {
+        let mut out = File::create(self.0.join(path))?;
+        io::copy(&mut file, &mut out)?;
+        Ok(())
+    }
+}
+
+fn pack(mut fs: impl FileSystem, package: &str, dll_file: PathBuf, toml: &Toml) -> Result<()> {
     let plugin_dir = PathBuf::from(package);
 
-    let mut dll = plugin_dir.join(package);
-    dll.set_extension("dll");
-    archive.start_file_from_path(dll.as_path(), FileOptions::default())?;
-    io::copy(&mut dll_file, &mut archive)?;
+    let dll_file = File::open(dll_file)?;
+    let mut dll_path = plugin_dir.join(package);
+    dll_path.set_extension("dll");
+    fs.create_file(dll_path, dll_file)?;
 
     for dll in &toml.dlls {
         let dll_name = dll.file_name().unwrap();
-
-        archive
-            .start_file_from_path(plugin_dir.join(dll_name).as_path(), FileOptions::default())?;
-        let mut dll_file = File::open(dll).context("Additional DLL for plugin")?;
-        io::copy(&mut dll_file, &mut archive)?;
+        let dll_file = File::open(dll).context("Additional DLL for plugin")?;
+        fs.create_file(plugin_dir.join(dll_name), dll_file)?;
     }
 
     if toml.langs.exists() {
@@ -229,22 +238,15 @@ fn pack(package: &str, filenames: Vec<PathBuf>, toml: &Toml) -> Result<()> {
         for lang in fs::read_dir(&toml.langs)? {
             let lang = lang?.path();
             let lang_file_name = lang.file_name().unwrap();
-
-            archive.start_file_from_path(
-                langs_dir.join(lang_file_name).as_path(),
-                FileOptions::default(),
-            )?;
-            let mut lang = File::open(lang)?;
-            io::copy(&mut lang, &mut archive)?;
+            let lang = File::open(&lang)?;
+            fs.create_file(langs_dir.join(lang_file_name), lang)?;
         }
     }
-
-    archive.finish()?;
 
     Ok(())
 }
 
-unsafe fn kill_aimp() -> Result<()> {
+unsafe fn find_aimp() -> Result<Option<DWORD>> {
     struct Snapshot(*mut c_void);
 
     impl Drop for Snapshot {
@@ -265,7 +267,7 @@ unsafe fn kill_aimp() -> Result<()> {
 
     let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if snapshot == INVALID_HANDLE_VALUE {
-        Err(Error::ToolhelpSnapshot)?;
+        Err(io::Error::last_os_error()).map_err(Error::ToolhelpSnapshot)?;
     }
     let snapshot = Snapshot(snapshot);
 
@@ -273,25 +275,30 @@ unsafe fn kill_aimp() -> Result<()> {
     entry.dwSize = mem::size_of::<PROCESSENTRY32>() as u32;
 
     if Process32First(*snapshot, &mut entry) == FALSE {
-        Err(Error::Process32First)?;
+        Err(io::Error::last_os_error()).map_err(Error::Process32First)?;
     }
 
-    loop {
+    let process = loop {
         let exe_file: [u8; MAX_PATH] = mem::transmute(entry.szExeFile);
         if exe_file.starts_with(AIMP_EXE.as_bytes()) {
-            let process = OpenProcess(PROCESS_TERMINATE, FALSE, entry.th32ProcessID);
-            if process == INVALID_HANDLE_VALUE {
-                Err(Error::OpenProcess)?;
-            }
-            TerminateProcess(process, 0);
-            CloseHandle(process);
+            break Some(entry.th32ProcessID);
         }
 
         if Process32Next(*snapshot, &mut entry) == FALSE {
-            break;
+            break None;
         }
-    }
+    };
 
+    Ok(process)
+}
+
+unsafe fn kill_aimp(process: DWORD) -> Result<()> {
+    let process = OpenProcess(PROCESS_TERMINATE, FALSE, process);
+    if process == INVALID_HANDLE_VALUE {
+        Err(io::Error::last_os_error()).map_err(Error::OpenProcess)?;
+    }
+    TerminateProcess(process, 0);
+    CloseHandle(process);
     Ok(())
 }
 
@@ -321,17 +328,34 @@ fn main() -> Result<()> {
         Err(Error::InvalidCrateType)?;
     }
 
-    pack(&package, artifact.filenames, &toml)?;
+    let dll = artifact
+        .filenames
+        .into_iter()
+        .find(|path| path.extension() == Some(OsStr::new("dll")))
+        .unwrap();
 
-    if !args.release && !args.no_run {
+    if args.release {
+        let mut zip = dll.clone();
+        zip.set_extension("zip");
+        let file = File::create(zip)?;
+
+        let fs = ArchiveFs(ZipWriter::new(file));
+        pack(fs, &package, dll, &toml)?;
+    } else if !args.no_run {
         unsafe {
-            kill_aimp()?;
+            find_aimp()?.map(|process| kill_aimp(process)).transpose()?;
         }
 
-        let plugin_dir = aimp_dir.join("Plugins").join(&package);
+        let plugins_dir = aimp_dir.join("Plugins");
+
+        let plugin_dir = plugins_dir.join(&package);
         if plugin_dir.exists() {
-            fs::remove_dir_all(plugin_dir)?;
+            fs::remove_dir_all(&plugin_dir)?;
         }
+        fs::create_dir(plugin_dir)?;
+
+        let fs = RealFs(plugins_dir);
+        pack(fs, &package, dll, &toml)?;
 
         let status = Command::new(aimp_dir.join(AIMP_EXE))
             .envs(env::vars())
