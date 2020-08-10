@@ -816,8 +816,6 @@ impl fmt::Display for FileUri {
     }
 }
 
-impl_prop_accessor!(FileUri);
-
 pub(crate) struct FileUriService(ComPtr<dyn IAIMPServiceFileURI2>);
 
 impl FileUriService {

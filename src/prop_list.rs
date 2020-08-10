@@ -1,3 +1,4 @@
+use crate::file::FileUri;
 use crate::{error::HresultExt, AimpString};
 use dashmap::DashMap;
 use iaimp::{ComInterface, ComRc, IAIMPPropertyList, IUnknown, TDateTime, HRESULT, IID};
@@ -136,9 +137,7 @@ macro_rules! impl_prop_accessor {
             }
 
             fn set(self, id: i32, list: &mut PropertyList<T>) {
-                if let Some(i) = self {
-                    i.set(id, list)
-                }
+                self.map(|x| x.0).set(id, list)
             }
         }
 
@@ -156,6 +155,7 @@ macro_rules! impl_prop_accessor {
 
 impl_prop_accessor!(TDateTime);
 impl_prop_accessor!(AimpString);
+impl_prop_accessor!(FileUri);
 
 macro_rules! impl_accessor_get_set {
     ($prop:ty, $get:ident, $set:ident) => {
@@ -210,7 +210,7 @@ impl<T: IAIMPPropertyList, U: ComInterface + ?Sized> PropertyListAccessor<T> for
                 value.as_mut_ptr(),
             );
             // E_NOTIMPL can be returned according to docs. Yep, this is crutch
-            // E_INVALIDARG is not docs, but returns when field is not set
+            // E_INVALIDARG is not in docs, but returned when field is not set
             if res == E_FAIL || res == E_NOTIMPL || res == E_INVALIDARG {
                 None
             } else {
