@@ -122,3 +122,9 @@ impl DerefMut for MemoryStream {
         &mut self.0
     }
 }
+
+impl From<MemoryStream> for Stream {
+    fn from(memory_stream: MemoryStream) -> Self {
+        unsafe { Stream((memory_stream.0).0.cast()) }
+    }
+}
