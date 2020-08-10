@@ -41,6 +41,8 @@ enum Error {
     InvalidCrateType,
     #[error("Color option is invalid")]
     InvalidColorOption,
+    #[error("Build failed")]
+    BuildFailed,
     #[error("Failed to create toolhelp snapshot: {0}")]
     ToolhelpSnapshot(io::Error),
     #[error("Process32First failed: {0}")]
@@ -162,28 +164,25 @@ fn cargo_build(
     Ok(child)
 }
 
-fn get_package_artifact(package: &str, mut child: Child) -> Result<Artifact> {
+fn get_package_artifact(package: &str, mut child: Child) -> Result<Option<Artifact>> {
     let reader = BufReader::new(child.stdout.take().unwrap());
-    let artifact = Message::parse_stream(reader)
-        .into_iter()
-        .find_map(|msg| {
-            msg.map(|msg| match msg {
-                Message::CompilerArtifact(artifact)
-                    if artifact.package_id.repr.starts_with(package)
-                        && artifact.target.src_path.ends_with("lib.rs") =>
-                {
-                    Some(artifact)
-                }
-                Message::CompilerMessage(msg) => {
-                    println!("{}", msg);
-                    None
-                }
-                _ => None,
-            })
-            .ok()
-            .flatten()
+    let artifact = Message::parse_stream(reader).into_iter().find_map(|msg| {
+        msg.map(|msg| match msg {
+            Message::CompilerArtifact(artifact)
+                if artifact.package_id.repr.starts_with(package)
+                    && artifact.target.src_path.ends_with("lib.rs") =>
+            {
+                Some(artifact)
+            }
+            Message::CompilerMessage(msg) => {
+                println!("{}", msg);
+                None
+            }
+            _ => None,
         })
-        .unwrap();
+        .ok()
+        .flatten()
+    });
     Ok(artifact)
 }
 
@@ -311,7 +310,7 @@ fn main() -> Result<()> {
 
     let package = get_package_name(args.package)?;
     let child = cargo_build(&package, args.release, args.color, args.target_dir)?;
-    let artifact = get_package_artifact(&package, child)?;
+    let artifact = get_package_artifact(&package, child)?.ok_or(Error::BuildFailed)?;
 
     if !artifact
         .target
