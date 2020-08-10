@@ -1557,7 +1557,7 @@ com_trait! {
 
         unsafe fn get_file_info(&self, info: ComPtr<dyn IAIMPFileInfo>,) -> HRESULT;
 
-        unsafe fn is_exists(&self,) -> HRESULT;
+        unsafe fn is_exists(&self,) -> BOOL;
 
         unsafe fn is_in_same_stream(&self, virtual_file: ComPtr<dyn IAIMPVirtualFile>,) -> HRESULT;
 

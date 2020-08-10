@@ -1,8 +1,6 @@
 use crate::{error::HresultExt, AimpString};
 use dashmap::DashMap;
-use iaimp::{
-    ComInterface, ComRc, IAIMPPropertyList, IAIMPString, IUnknown, TDateTime, HRESULT, IID,
-};
+use iaimp::{ComInterface, ComRc, IAIMPPropertyList, IUnknown, TDateTime, HRESULT, IID};
 use std::mem::MaybeUninit;
 use winapi::shared::winerror::{E_FAIL, E_INVALIDARG, E_NOTIMPL, NOERROR, S_OK};
 
@@ -138,7 +136,9 @@ macro_rules! impl_prop_accessor {
             }
 
             fn set(self, id: i32, list: &mut PropertyList<T>) {
-                self.as_deref().copied().set(id, list)
+                if let Some(i) = self {
+                    i.set(id, list)
+                }
             }
         }
 
@@ -155,6 +155,7 @@ macro_rules! impl_prop_accessor {
 }
 
 impl_prop_accessor!(TDateTime);
+impl_prop_accessor!(AimpString);
 
 macro_rules! impl_accessor_get_set {
     ($prop:ty, $get:ident, $set:ident) => {
@@ -238,16 +239,6 @@ impl<T: IAIMPPropertyList, U: ComInterface + ?Sized> PropertyListAccessor<T> for
 
     fn set(self, id: i32, list: &mut PropertyList<T>) {
         Some(self).set(id, list)
-    }
-}
-
-impl<T: IAIMPPropertyList> PropertyListAccessor<T> for AimpString {
-    fn get(id: i32, list: &PropertyList<T>) -> Self {
-        Self(ComRc::<dyn IAIMPString>::get(id, list))
-    }
-
-    fn set(self, id: i32, list: &mut PropertyList<T>) {
-        self.0.set(id, list)
     }
 }
 

@@ -20,11 +20,11 @@ use iaimp::{
     IAIMPFileSystemCommandDropSource, IAIMPFileSystemCommandFileInfo,
     IAIMPFileSystemCommandOpenFileFolder, IAIMPFileSystemCommandStreaming,
     IAIMPFileSystemCustomFileCommand, IAIMPImage, IAIMPImageContainer, IAIMPObjectList,
-    IAIMPProgressCallback, IAIMPServiceFileFormats, IAIMPServiceFileInfo,
+    IAIMPProgressCallback, IAIMPPropertyList, IAIMPServiceFileFormats, IAIMPServiceFileInfo,
     IAIMPServiceFileInfoFormatter, IAIMPServiceFileInfoFormatterUtils, IAIMPServiceFileManager,
     IAIMPServiceFileStreaming, IAIMPServiceFileSystems, IAIMPServiceFileURI, IAIMPServiceFileURI2,
     IAIMPStream, IAIMPString, IAIMPVirtualFile, IUnknown, TAIMPFileAttributes, TDateTime,
-    VirtualFileProp, IID,
+    VirtualFileProp, HRESULT, IID,
 };
 use std::{
     fmt,
@@ -32,9 +32,11 @@ use std::{
     ops::{Deref, DerefMut, Range},
     time::SystemTime,
 };
+use winapi::shared::minwindef::BOOL;
+use winapi::shared::winerror::E_UNEXPECTED;
 use winapi::shared::{
     minwindef::TRUE,
-    winerror::{E_FAIL, E_NOTIMPL, HRESULT, S_OK},
+    winerror::{E_FAIL, E_NOTIMPL, HRESULT as WinHRESULT, S_OK},
 };
 
 pub static FILE_FORMATS: Service<FileFormats> = Service::new();
@@ -207,17 +209,138 @@ impl Deref for FileInfoMark {
 
 impl_prop_accessor!(FileInfoMark);
 
+pub trait CustomVirtualFile {
+    type Error;
+
+    fn create_stream(&self) -> Result<Option<Stream>, Self::Error>;
+
+    fn file_info(&self) -> Option<FileInfo>;
+
+    fn is_exists(&self) -> bool;
+
+    fn is_in_same_stream(&self, virtual_file: &VirtualFile) -> Result<(), Self::Error>;
+
+    fn sync(&self) -> Result<(), Self::Error>;
+}
+
+struct CustomVirtualFileWrapper<T> {
+    inner: T,
+    hashed: HashedPropertyList,
+}
+
+impl<T> IAIMPPropertyList for CustomVirtualFileWrapper<T> {
+    unsafe fn begin_update(&self) {
+        self.hashed.begin_update()
+    }
+
+    unsafe fn end_update(&self) {
+        self.hashed.end_update()
+    }
+
+    unsafe fn reset(&self) -> HRESULT {
+        self.hashed.reset()
+    }
+
+    unsafe fn get_value_as_float(&self, property_id: i32, value: *mut f64) -> HRESULT {
+        self.hashed.get_value_as_float(property_id, value)
+    }
+
+    unsafe fn get_value_as_int32(&self, property_id: i32, value: *mut i32) -> HRESULT {
+        self.hashed.get_value_as_int32(property_id, value)
+    }
+
+    unsafe fn get_value_as_int64(&self, property_id: i32, value: *mut i64) -> HRESULT {
+        self.hashed.get_value_as_int64(property_id, value)
+    }
+
+    unsafe fn get_value_as_object(
+        &self,
+        property_id: i32,
+        iid: *const IID,
+        value: *mut ComRc<dyn IUnknown>,
+    ) -> HRESULT {
+        self.hashed.get_value_as_object(property_id, iid, value)
+    }
+
+    unsafe fn set_value_as_float(&self, property_id: i32, value: f64) -> HRESULT {
+        self.hashed.set_value_as_float(property_id, value)
+    }
+
+    unsafe fn set_value_as_int32(&self, property_id: i32, value: i32) -> HRESULT {
+        self.hashed.set_value_as_int32(property_id, value)
+    }
+
+    unsafe fn set_value_as_int64(&self, property_id: i32, value: i64) -> HRESULT {
+        self.hashed.set_value_as_int64(property_id, value)
+    }
+
+    unsafe fn set_value_as_object(&self, property_id: i32, value: ComRc<dyn IUnknown>) -> HRESULT {
+        self.hashed.set_value_as_object(property_id, value)
+    }
+}
+
+impl<T: CustomVirtualFile> IAIMPVirtualFile for CustomVirtualFileWrapper<T> {
+    unsafe fn create_stream(&self, stream: *mut ComRc<dyn IAIMPStream>) -> HRESULT {
+        let res = match self.inner.create_stream() {
+            Ok(Some(tstream)) => {
+                stream.write(tstream.0);
+                S_OK
+            }
+            Ok(None) => E_NOTIMPL,
+            Err(_) => E_UNEXPECTED,
+        };
+        HRESULT(res)
+    }
+
+    unsafe fn get_file_info(&self, info: ComPtr<dyn IAIMPFileInfo>) -> HRESULT {
+        if let Some(i) = self.inner.file_info() {
+            let rc = ComRc::from(info);
+            rc.add_ref();
+            let mut info = FileInfo::from(rc);
+            info.clone_from(&i);
+            HRESULT(S_OK)
+        } else {
+            HRESULT(E_FAIL)
+        }
+    }
+
+    unsafe fn is_exists(&self) -> BOOL {
+        self.inner.is_exists() as BOOL
+    }
+
+    unsafe fn is_in_same_stream(&self, virtual_file: ComPtr<dyn IAIMPVirtualFile>) -> HRESULT {
+        let virtual_file = ComRc::from(virtual_file);
+        virtual_file.add_ref();
+        let virtual_file = VirtualFile::from_com_rc(virtual_file);
+        if let Ok(()) = self.inner.is_in_same_stream(&virtual_file) {
+            HRESULT(S_OK)
+        } else {
+            HRESULT(E_FAIL)
+        }
+    }
+
+    unsafe fn synchronize(&self) -> HRESULT {
+        if let Ok(()) = self.inner.sync() {
+            HRESULT(S_OK)
+        } else {
+            HRESULT(E_FAIL)
+        }
+    }
+}
+
+impl<T> ComInterfaceQuerier for CustomVirtualFileWrapper<T> {}
+
 prop_list! {
     list: VirtualFile(ComRc<dyn IAIMPVirtualFile>),
     prop: VirtualFileProp,
     guard: VirtualFileGuard,
     methods:
     index_in_set(IndexInSet) -> i32,
-    clip_start(ClipStart) -> f64,
-    clip_finish(ClipFinish) -> f64,
-    audio_source_file(AudioSourceFile) -> AimpString,
-    file_format(FileFormat) -> AimpString,
-    file_uri(FileUri) -> AimpString,
+    clip_start(ClipStart) -> Option<f64>,
+    clip_finish(ClipFinish) -> Option<f64>,
+    audio_source_file(AudioSourceFile) -> Option<AimpString>,
+    file_format(FileFormat) -> Option<AimpString>,
+    file_uri(FileUri) -> FileUri,
 }
 
 impl VirtualFile {
@@ -225,6 +348,15 @@ impl VirtualFile {
         Self {
             prop_list: PropertyList::from(rc),
         }
+    }
+
+    pub fn from_custom<T: CustomVirtualFile>(custom: T) -> Self {
+        let wrapper = CustomVirtualFileWrapper {
+            inner: custom,
+            hashed: HashedPropertyList::default(),
+        };
+        let wrapper = unsafe { com_wrapper!(wrapper => dyn IAIMPVirtualFile).into_com_rc() };
+        Self::from_com_rc(wrapper)
     }
 
     pub fn from_file_uri<T: Into<FileUri>>(file_uri: T) -> Option<Self> {
@@ -683,6 +815,8 @@ impl fmt::Display for FileUri {
         fmt::Display::fmt(&self.0, f)
     }
 }
+
+impl_prop_accessor!(FileUri);
 
 pub(crate) struct FileUriService(ComPtr<dyn IAIMPServiceFileURI2>);
 
@@ -1145,17 +1279,17 @@ macro_rules! delegate_call {
 }
 
 impl IAIMPFileSystemCustomFileCommand for FileSystem {
-    unsafe fn can_process(&self, file_name: ComRc<dyn IAIMPString>) -> HRESULT {
+    unsafe fn can_process(&self, file_name: ComRc<dyn IAIMPString>) -> WinHRESULT {
         delegate_call!(self.custom.can_process(AimpString(file_name)))
     }
 
-    unsafe fn process(&self, file_name: ComRc<dyn IAIMPString>) -> HRESULT {
+    unsafe fn process(&self, file_name: ComRc<dyn IAIMPString>) -> WinHRESULT {
         delegate_call!(self.custom.process(AimpString(file_name)))
     }
 }
 
 impl IAIMPFileSystemCommandCopyToClipboard for FileSystem {
-    unsafe fn copy_to_clipboard(&self, files: ComRc<dyn IAIMPObjectList>) -> HRESULT {
+    unsafe fn copy_to_clipboard(&self, files: ComRc<dyn IAIMPObjectList>) -> WinHRESULT {
         delegate_call!(self
             .copy_to_clipboard
             .copy_to_clipboard(List::from_com_rc(files)))
@@ -1169,7 +1303,7 @@ impl IAIMPFileSystemCommandDropSource for FileSystem {
         &self,
         file_name: ComRc<dyn IAIMPString>,
         stream: *mut ComRc<dyn IAIMPStream>,
-    ) -> HRESULT {
+    ) -> WinHRESULT {
         delegate_call!(self
             .drop_source
             .create_stream(AimpString(file_name))
@@ -1182,7 +1316,7 @@ impl IAIMPFileSystemCommandFileInfo for FileSystem {
         &self,
         file_name: ComRc<dyn IAIMPString>,
         attrs: *mut TAIMPFileAttributes,
-    ) -> HRESULT {
+    ) -> WinHRESULT {
         delegate_call!(self
             .file_info
             .file_attrs(AimpString(file_name))
@@ -1197,14 +1331,18 @@ impl IAIMPFileSystemCommandFileInfo for FileSystem {
             })))
     }
 
-    unsafe fn get_file_size(&self, file_name: ComRc<dyn IAIMPString>, size: *mut i64) -> HRESULT {
+    unsafe fn get_file_size(
+        &self,
+        file_name: ComRc<dyn IAIMPString>,
+        size: *mut i64,
+    ) -> WinHRESULT {
         delegate_call!(self
             .file_info
             .file_size(AimpString(file_name))
             .map(|s| size.write(s)))
     }
 
-    unsafe fn is_file_exists(&self, file_name: ComRc<dyn IAIMPString>) -> HRESULT {
+    unsafe fn is_file_exists(&self, file_name: ComRc<dyn IAIMPString>) -> WinHRESULT {
         delegate_call!(self.file_info.is_file_exists(AimpString(file_name)))
     }
 }
@@ -1413,7 +1551,7 @@ where
         file_name: ComRc<dyn IAIMPString>,
         list: *mut ComRc<dyn IAIMPObjectList>,
         callback: Option<ComPtr<dyn IAIMPProgressCallback>>,
-    ) -> HRESULT {
+    ) -> WinHRESULT {
         let res = self
             .0
             .expand(AimpString(file_name), callback.map(ProgressCallback));
@@ -1448,17 +1586,17 @@ pub trait FileFormat {
 pub struct FileFormatWrapper<T>(pub T);
 
 impl<T: FileFormat> IAIMPExtensionFileFormat for FileFormatWrapper<T> {
-    unsafe fn get_description(&self, s: *mut ComRc<dyn IAIMPString>) -> HRESULT {
+    unsafe fn get_description(&self, s: *mut ComRc<dyn IAIMPString>) -> WinHRESULT {
         s.write(AimpString::from(T::DESCRIPTION).0);
         S_OK
     }
 
-    unsafe fn get_ext_list(&self, s: *mut ComRc<dyn IAIMPString>) -> HRESULT {
+    unsafe fn get_ext_list(&self, s: *mut ComRc<dyn IAIMPString>) -> WinHRESULT {
         s.write(AimpString::from(T::EXTS.join(";") + ";").0);
         S_OK
     }
 
-    unsafe fn get_flags(&self, s: *mut FileFormatsCategory) -> HRESULT {
+    unsafe fn get_flags(&self, s: *mut FileFormatsCategory) -> WinHRESULT {
         *s = T::FLAGS;
         S_OK
     }
@@ -1509,7 +1647,7 @@ where
         &self,
         file_uri: ComRc<dyn IAIMPString>,
         info: ComRc<dyn IAIMPFileInfo>,
-    ) -> HRESULT {
+    ) -> WinHRESULT {
         match self {
             FileInfoProviderWrapper::Uri(provider)
             | FileInfoProviderWrapper::UriAndStream(provider, _) => {
@@ -1531,7 +1669,7 @@ where
         &self,
         stream: ComRc<dyn IAIMPStream>,
         info: ComRc<dyn IAIMPFileInfo>,
-    ) -> HRESULT {
+    ) -> WinHRESULT {
         match self {
             FileInfoProviderWrapper::Uri(_) => S_OK,
             FileInfoProviderWrapper::Stream(provider)
