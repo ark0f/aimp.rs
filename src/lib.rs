@@ -39,7 +39,7 @@ use winapi::shared::winerror::E_NOINTERFACE;
 #[doc(hidden)]
 pub mod macro_export {
     pub use crate::{util::message_box, wrapper::Wrapper};
-    pub use iaimp::{com_wrapper, ComWrapper, IAIMPPlugin, IUnknown};
+    pub use iaimp::{com_wrapper, ComRc, ComWrapper, IAIMPPlugin, IUnknown};
     pub use winapi::shared::winerror::{HRESULT, S_OK};
 }
 
@@ -48,7 +48,7 @@ macro_rules! main {
     ($entry:ident) => {
         #[no_mangle]
         pub unsafe extern "stdcall" fn AIMPPluginGetHeader(
-            header: *mut *mut std::ffi::c_void,
+            header: *mut $crate::macro_export::ComRc<dyn $crate::macro_export::IAIMPPlugin>,
         ) -> $crate::macro_export::HRESULT {
             use $crate::macro_export::IUnknown;
 
@@ -56,11 +56,12 @@ macro_rules! main {
 
             std::panic::set_hook(Box::new(|info| $crate::macro_export::message_box(info.to_string())));
 
-            let wrapper = $crate::macro_export::com_wrapper!(
-                Wrapper::new() => $crate::macro_export::IAIMPPlugin
-            );
-            wrapper.add_ref();
-            *header = Box::into_raw(Box::new(wrapper)) as _;
+            let wrapper =
+                $crate::macro_export::com_wrapper!(
+                    Wrapper::new() => $crate::macro_export::IAIMPPlugin
+                )
+                .into_com_rc();
+            header.write(wrapper);
 
             $crate::macro_export::S_OK
         }
