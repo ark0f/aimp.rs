@@ -344,7 +344,7 @@ prop_list! {
 }
 
 impl VirtualFile {
-    fn from_com_rc(rc: ComRc<dyn IAIMPVirtualFile>) -> Self {
+    pub(crate) fn from_com_rc(rc: ComRc<dyn IAIMPVirtualFile>) -> Self {
         Self {
             prop_list: PropertyList::from(rc),
         }

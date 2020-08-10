@@ -15,11 +15,12 @@ pub use crate::core::{Core, CORE};
 pub use error::{Error, ErrorKind, Result};
 pub use iaimp::{CorePath, PluginCategory};
 
+use crate::file::VirtualFile;
 use crate::util::ToWide;
 use error::HresultExt;
 use iaimp::{
     ComInterface, ComPtr, ComRc, IAIMPErrorInfo, IAIMPObjectList, IAIMPProgressCallback,
-    IAIMPString, StringCase,
+    IAIMPString, IAIMPVirtualFile, StringCase,
 };
 use std::{
     cmp::Ordering,
@@ -348,6 +349,18 @@ impl Object for AimpString {
 
     fn into_com_rc(self) -> ComRc<Self::Interface> {
         self.0
+    }
+}
+
+impl Object for VirtualFile {
+    type Interface = dyn IAIMPVirtualFile;
+
+    fn from_com_rc(rc: ComRc<Self::Interface>) -> Self {
+        VirtualFile::from_com_rc(rc)
+    }
+
+    fn into_com_rc(self) -> ComRc<Self::Interface> {
+        self.prop_list.0
     }
 }
 
