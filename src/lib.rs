@@ -446,7 +446,7 @@ impl<T: Object> List<T> {
         self.inner.insert(idx, obj)
     }
 
-    pub fn set_obj(&mut self, idx: u16, obj: T) {
+    pub fn set(&mut self, idx: u16, obj: T) {
         self.inner.set_obj(idx, obj)
     }
 
