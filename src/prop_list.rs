@@ -1,5 +1,4 @@
-use crate::file::FileUri;
-use crate::{error::HresultExt, AimpString};
+use crate::error::HresultExt;
 use dashmap::DashMap;
 use iaimp::{ComInterface, ComRc, IAIMPPropertyList, IUnknown, TDateTime, HRESULT, IID};
 use std::mem::MaybeUninit;
@@ -132,21 +131,21 @@ macro_rules! impl_prop_accessor {
         impl<T: iaimp::IAIMPPropertyList> $crate::prop_list::PropertyListAccessor<T>
             for Option<$ty>
         {
-            fn get(id: i32, list: &PropertyList<T>) -> Self {
+            fn get(id: i32, list: &$crate::prop_list::PropertyList<T>) -> Self {
                 Option::<_>::get(id, list).map($ty)
             }
 
-            fn set(self, id: i32, list: &mut PropertyList<T>) {
+            fn set(self, id: i32, list: &mut $crate::prop_list::PropertyList<T>) {
                 self.map(|x| x.0).set(id, list)
             }
         }
 
         impl<T: iaimp::IAIMPPropertyList> $crate::prop_list::PropertyListAccessor<T> for $ty {
-            fn get(id: i32, list: &PropertyList<T>) -> Self {
+            fn get(id: i32, list: &$crate::prop_list::PropertyList<T>) -> Self {
                 Option::<Self>::get(id, list).unwrap()
             }
 
-            fn set(self, id: i32, list: &mut PropertyList<T>) {
+            fn set(self, id: i32, list: &mut $crate::prop_list::PropertyList<T>) {
                 Some(self).set(id, list)
             }
         }
@@ -154,8 +153,6 @@ macro_rules! impl_prop_accessor {
 }
 
 impl_prop_accessor!(TDateTime);
-impl_prop_accessor!(AimpString);
-impl_prop_accessor!(FileUri);
 
 macro_rules! impl_accessor_get_set {
     ($prop:ty, $get:ident, $set:ident) => {

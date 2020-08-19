@@ -1,6 +1,6 @@
 use crate::{core::CORE, error::HresultExt, Error, ErrorKind, Result};
 use futures::io::SeekFrom;
-use iaimp::{ComInterface, ComRc, IAIMPMemoryStream, IAIMPStream, StreamSeekFrom};
+use iaimp::{ComInterface, ComPtr, ComRc, IAIMPMemoryStream, IAIMPStream, StreamSeekFrom};
 use std::{
     fmt, io,
     io::{Read, Seek, Write},
@@ -16,11 +16,11 @@ pub enum StreamError {
     Offset,
 }
 
-pub struct Stream<T: ComInterface + IAIMPStream + ?Sized = dyn IAIMPStream>(pub(crate) ComRc<T>);
+pub struct Stream(pub(crate) ComRc<dyn IAIMPStream>);
 
-impl<T: ComInterface + IAIMPStream + ?Sized> Stream<T> {
-    pub(crate) fn as_inner(&self) -> &ComRc<T> {
-        &self.0
+impl Stream {
+    pub(crate) unsafe fn as_inner<T: ComInterface + IAIMPStream + ?Sized>(&self) -> ComPtr<T> {
+        self.0.as_raw().cast()
     }
 
     pub fn size(&self) -> i64 {
@@ -36,7 +36,7 @@ impl<T: ComInterface + IAIMPStream + ?Sized> Stream<T> {
     }
 }
 
-impl<T: ComInterface + IAIMPStream + ?Sized> Seek for Stream<T> {
+impl Seek for Stream {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let (offset, mode) = match pos {
             SeekFrom::Start(offset) => (offset as i64, StreamSeekFrom::Beginning),
@@ -56,7 +56,7 @@ impl<T: ComInterface + IAIMPStream + ?Sized> Seek for Stream<T> {
     }
 }
 
-impl<T: ComInterface + IAIMPStream + ?Sized> Read for Stream<T> {
+impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let written = unsafe { self.0.read(buf.as_mut_ptr(), buf.len() as _) };
         if written == -1 {
@@ -70,7 +70,7 @@ impl<T: ComInterface + IAIMPStream + ?Sized> Read for Stream<T> {
     }
 }
 
-impl<T: ComInterface + IAIMPStream + ?Sized> Write for Stream<T> {
+impl Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         unsafe {
             let mut written = MaybeUninit::uninit();
@@ -88,14 +88,14 @@ impl<T: ComInterface + IAIMPStream + ?Sized> Write for Stream<T> {
     }
 }
 
-impl<T: ComInterface + IAIMPStream + ?Sized> fmt::Debug for Stream<T> {
+impl fmt::Debug for Stream {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
     }
 }
 
 #[derive(Debug)]
-pub struct MemoryStream(pub(crate) Stream<dyn IAIMPMemoryStream>);
+pub struct MemoryStream(pub(crate) Stream);
 
 impl Default for MemoryStream {
     fn default() -> Self {
@@ -105,12 +105,23 @@ impl Default for MemoryStream {
 
 impl AsRef<[u8]> for MemoryStream {
     fn as_ref(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.as_inner().get_data(), self.size() as usize) }
+        unsafe {
+            slice::from_raw_parts(
+                self.as_inner::<dyn IAIMPMemoryStream>().get_data(),
+                self.size() as usize,
+            )
+        }
+    }
+}
+
+impl AsRef<Stream> for MemoryStream {
+    fn as_ref(&self) -> &Stream {
+        unsafe { &*(Deref::deref(self) as *const Stream) }
     }
 }
 
 impl Deref for MemoryStream {
-    type Target = Stream<dyn IAIMPMemoryStream>;
+    type Target = Stream;
 
     fn deref(&self) -> &Self::Target {
         &self.0

@@ -240,7 +240,7 @@ impl<T: AudioDecoderBuilder> IAIMPExtensionAudioDecoder for AudioDecoderBuilderW
             Err(err) => {
                 error_info.add_ref();
                 let mut error_info = ErrorInfo(ComRc::from(error_info));
-                error_info.set(ErrorInfoContent {
+                error_info.set(&ErrorInfoContent {
                     code: 1,
                     msg: AimpString::from(err.to_string()),
                     details: None,

@@ -10,7 +10,6 @@ use crate::{
     msg_box,
     threading::THREADS,
     util::ToWide,
-    Plugin,
 };
 use iaimp::{
     ComInterface, ComInterfaceQuerier, ComPtr, IAIMPCore, IAIMPPlugin, IAIMPServiceActionManager,
@@ -20,28 +19,48 @@ use iaimp::{
     IAIMPServiceHTTPClient2, IAIMPServiceThreads, IUnknown, PluginCategory, PluginInfoWrapper,
     SystemNotification, SystemNotificationWrapper,
 };
-use std::{cell::Cell, mem::MaybeUninit, ptr};
+use std::{
+    cell::Cell, error::Error as StdError, mem::MaybeUninit, ptr, result::Result as StdResult,
+};
 use winapi::{
     shared::winerror::{E_FAIL, HRESULT, NOERROR, S_OK},
     um::winnt::PWCHAR,
 };
 
-pub struct Wrapper<T> {
-    inner: Cell<Option<T>>,
-    info: WrapperInfo,
+pub trait Plugin: Sized {
+    const INFO: PluginInfo;
+
+    type Error: StdError;
+
+    fn new() -> StdResult<Self, Self::Error>;
+
+    fn finish(self) -> StdResult<(), Self::Error>;
 }
 
-impl<T: Plugin> Wrapper<T> {
+pub struct PluginInfo {
+    pub name: &'static str,
+    pub author: &'static str,
+    pub short_description: &'static str,
+    pub full_description: Option<&'static str>,
+    pub category: fn() -> PluginCategory,
+}
+
+pub struct PluginWrapper<T> {
+    inner: Cell<Option<T>>,
+    info: PluginWrapperInfo,
+}
+
+impl<T: Plugin> PluginWrapper<T> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             inner: Cell::new(None),
-            info: WrapperInfo::new::<T>(),
+            info: PluginWrapperInfo::new::<T>(),
         }
     }
 }
 
-impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
+impl<T: Plugin> IAIMPPlugin for PluginWrapper<T> {
     unsafe fn info_get(&self, index: PluginInfoWrapper) -> PWCHAR {
         let p = match index.into_inner() {
             Some(iaimp::PluginInfo::Name) => self.info.name.as_ptr(),
@@ -78,6 +97,8 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
         FILE_SYSTEMS.init(core.query_object());
 
         AUDIO_DECODERS.init(core.query_object());
+
+        drop(core);
 
         match T::new() {
             Ok(plugin) => {
@@ -146,10 +167,10 @@ impl<T: Plugin> IAIMPPlugin for Wrapper<T> {
     }
 }
 
-impl<T> ComInterfaceQuerier for Wrapper<T> {}
+impl<T> ComInterfaceQuerier for PluginWrapper<T> {}
 
 #[derive(Debug)]
-struct WrapperInfo {
+struct PluginWrapperInfo {
     name: Vec<u16>,
     author: Vec<u16>,
     short_description: Vec<u16>,
@@ -157,7 +178,7 @@ struct WrapperInfo {
     category: PluginCategory,
 }
 
-impl WrapperInfo {
+impl PluginWrapperInfo {
     fn new<T: Plugin>() -> Self {
         let info = T::INFO;
         Self {

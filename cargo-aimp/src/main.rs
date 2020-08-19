@@ -94,6 +94,8 @@ struct Args {
     #[structopt(long = "release")]
     /// Builds DLL in release mode and pack it into zip archive
     release: bool,
+    #[structopt(long = "features")]
+    features: Vec<String>,
     #[structopt(long = "color", default_value = "auto")]
     color: Color,
     #[structopt(long = "target-dir")]
@@ -141,6 +143,7 @@ fn get_package_name(package_flag: Option<String>) -> Result<String> {
 fn cargo_build(
     package: &str,
     release: bool,
+    features: Vec<String>,
     color: Color,
     target_dir: Option<String>,
 ) -> Result<Child> {
@@ -157,6 +160,10 @@ fn cargo_build(
     if release {
         cmd.arg("--release");
     }
+    if !features.is_empty() {
+        cmd.arg("--features");
+        cmd.args(features);
+    }
     if let Some(dir) = target_dir {
         cmd.args(&["--target-dir", &dir]);
     }
@@ -164,12 +171,13 @@ fn cargo_build(
     Ok(child)
 }
 
-fn get_package_artifact(package: &str, mut child: Child) -> Result<Option<Artifact>> {
+fn get_package_artifact(package: String, mut child: Child) -> Result<Option<Artifact>> {
+    let package_pattern = package + " ";
     let reader = BufReader::new(child.stdout.take().unwrap());
     let artifact = Message::parse_stream(reader).into_iter().find_map(|msg| {
         msg.map(|msg| match msg {
             Message::CompilerArtifact(artifact)
-                if artifact.package_id.repr.starts_with(package)
+                if artifact.package_id.repr.starts_with(&package_pattern)
                     && artifact.target.src_path.ends_with("lib.rs") =>
             {
                 Some(artifact)
@@ -184,6 +192,15 @@ fn get_package_artifact(package: &str, mut child: Child) -> Result<Option<Artifa
         .flatten()
     });
     Ok(artifact)
+}
+
+fn remove_plugin(package: &str, plugins_dir: &PathBuf) -> io::Result<()> {
+    let plugin_dir = plugins_dir.join(&package);
+    if plugin_dir.exists() {
+        fs::remove_dir_all(&plugin_dir)?;
+    }
+    fs::create_dir(plugin_dir)?;
+    Ok(())
 }
 
 trait FileSystem: Sized {
@@ -309,8 +326,14 @@ fn main() -> Result<()> {
         .map_or_else(|_| PathBuf::from(AIMP_ROOT_DIR), PathBuf::from);
 
     let package = get_package_name(args.package)?;
-    let child = cargo_build(&package, args.release, args.color, args.target_dir)?;
-    let artifact = get_package_artifact(&package, child)?.ok_or(Error::BuildFailed)?;
+    let child = cargo_build(
+        &package,
+        args.release,
+        args.features,
+        args.color,
+        args.target_dir,
+    )?;
+    let artifact = get_package_artifact(package.clone(), child)?.ok_or(Error::BuildFailed)?;
 
     if !artifact
         .target
@@ -341,13 +364,9 @@ fn main() -> Result<()> {
 
         let plugins_dir = aimp_root_dir.join("Plugins");
 
-        let plugin_dir = plugins_dir.join(&package);
-        if plugin_dir.exists() {
-            fs::remove_dir_all(&plugin_dir)?;
-        }
-        fs::create_dir(plugin_dir)?;
+        remove_plugin(&package, &plugins_dir)?;
 
-        let fs = RealFs(plugins_dir);
+        let fs = RealFs(plugins_dir.clone());
         pack(fs, &package, dll, &toml)?;
 
         let status = Command::new(aimp_root_dir.join(AIMP_EXE))
@@ -356,6 +375,8 @@ fn main() -> Result<()> {
             .stderr(Stdio::inherit())
             .output()?
             .status;
+
+        remove_plugin(&package, &plugins_dir)?;
 
         if !status.success() {
             if let Some(code) = status.code() {

@@ -4,19 +4,23 @@ pub mod decoders;
 mod error;
 pub mod file;
 pub mod internet;
+pub mod test;
 #[macro_use]
 mod prop_list;
+mod plugin;
 pub mod stream;
 pub mod threading;
 mod util;
-mod wrapper;
 
-pub use crate::core::{Core, CORE};
+pub use crate::{
+    core::{Core, CORE},
+    plugin::{Plugin, PluginInfo},
+};
+pub use aimp_derive::test;
 pub use error::{Error, ErrorKind, Result};
-pub use iaimp::{CorePath, PluginCategory};
+pub use iaimp::{CorePath, PluginCategory, IID};
 
-use crate::file::VirtualFile;
-use crate::util::ToWide;
+use crate::{file::VirtualFile, util::ToWide};
 use error::HresultExt;
 use iaimp::{
     ComInterface, ComPtr, ComRc, IAIMPErrorInfo, IAIMPObjectList, IAIMPProgressCallback,
@@ -24,22 +28,23 @@ use iaimp::{
 };
 use std::{
     cmp::Ordering,
-    error::Error as StdError,
     fmt,
     hash::{Hash, Hasher},
+    iter::FromIterator,
     marker::PhantomData,
     mem::MaybeUninit,
     ops::{Add, AddAssign},
     os::raw::c_int,
-    result::Result as StdResult,
     slice,
 };
 use winapi::shared::winerror::E_NOINTERFACE;
 
 #[doc(hidden)]
 pub mod macro_export {
-    pub use crate::{util::message_box, wrapper::Wrapper};
+    pub use crate::{plugin::PluginWrapper, util::message_box};
+    pub use aimp_derive::test_fns;
     pub use iaimp::{com_wrapper, ComRc, ComWrapper, IAIMPPlugin, IUnknown};
+    pub use tester;
     pub use winapi::shared::winerror::{HRESULT, S_OK};
 }
 
@@ -50,15 +55,13 @@ macro_rules! main {
         pub unsafe extern "stdcall" fn AIMPPluginGetHeader(
             header: *mut $crate::macro_export::ComRc<dyn $crate::macro_export::IAIMPPlugin>,
         ) -> $crate::macro_export::HRESULT {
-            use $crate::macro_export::IUnknown;
+            type Wrapper = $crate::macro_export::PluginWrapper::<$entry>;
 
-            type Wrapper = $crate::macro_export::Wrapper::<$entry>;
-
-            std::panic::set_hook(Box::new(|info| $crate::macro_export::message_box(info.to_string())));
+            $crate::main!(@test $entry);
 
             let wrapper =
                 $crate::macro_export::com_wrapper!(
-                    Wrapper::new() => $crate::macro_export::IAIMPPlugin
+                    Wrapper::new() => dyn $crate::macro_export::IAIMPPlugin
                 )
                 .into_com_rc();
             header.write(wrapper);
@@ -66,24 +69,19 @@ macro_rules! main {
             $crate::macro_export::S_OK
         }
     };
-}
+    (@test TesterPlugin) => {
+        $crate::test::TEST_FNS.with(|fns| {
+            #[$crate::macro_export::test_fns]
+            fn test_fns() -> Vec<$crate::macro_export::tester::TestDescAndFn> {
+                unreachable!()
+            }
 
-pub trait Plugin: Sized {
-    const INFO: PluginInfo;
-
-    type Error: StdError;
-
-    fn new() -> StdResult<Self, Self::Error>;
-
-    fn finish(self) -> StdResult<(), Self::Error>;
-}
-
-pub struct PluginInfo {
-    pub name: &'static str,
-    pub author: &'static str,
-    pub short_description: &'static str,
-    pub full_description: Option<&'static str>,
-    pub category: fn() -> PluginCategory,
+            *fns.borrow_mut() = Some(test_fns());
+        });
+    };
+    (@test $entry:ident) => {
+        std::panic::set_hook(std::boxed::Box::new(|info| $crate::macro_export::message_box(info.to_string())));
+    };
 }
 
 pub struct AimpString(pub ComRc<dyn IAIMPString>);
@@ -269,6 +267,24 @@ impl AddAssign for AimpString {
     }
 }
 
+impl Extend<AimpString> for AimpString {
+    fn extend<T: IntoIterator<Item = AimpString>>(&mut self, iter: T) {
+        for item in iter {
+            *self += item;
+        }
+    }
+}
+
+impl FromIterator<AimpString> for AimpString {
+    fn from_iter<T: IntoIterator<Item = AimpString>>(iter: T) -> Self {
+        let mut s = AimpString::default();
+        s.extend(iter);
+        s
+    }
+}
+
+impl_prop_accessor!(AimpString);
+
 #[derive(Debug)]
 pub struct ErrorInfo(ComRc<dyn IAIMPErrorInfo>);
 
@@ -298,12 +314,15 @@ impl ErrorInfo {
         }
     }
 
-    pub fn set(&mut self, content: ErrorInfoContent) {
+    pub fn set(&mut self, content: &ErrorInfoContent) {
         unsafe {
             self.0.set_info(
                 content.code,
-                content.msg.0,
-                content.details.map(|details| details.0),
+                Clone::clone(&content.msg.0),
+                content
+                    .details
+                    .as_ref()
+                    .map(|details| Clone::clone(&details.0)),
             )
         }
     }
@@ -326,7 +345,7 @@ impl fmt::Display for ErrorInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ErrorInfoContent {
     pub code: i32,
     pub msg: AimpString,
@@ -390,7 +409,7 @@ impl ObjectList {
         }
     }
 
-    pub fn set_obj<T: Object>(&mut self, idx: u16, obj: T) {
+    pub fn set<T: Object>(&mut self, idx: u16, obj: T) {
         unsafe {
             self.0
                 .set_object(idx as i32, obj.into_com_rc().cast())
@@ -399,7 +418,7 @@ impl ObjectList {
         }
     }
 
-    pub fn get_obj<T: Object>(&mut self, idx: u16) -> Option<T> {
+    pub fn get<T: Object>(&mut self, idx: u16) -> Option<T> {
         unsafe {
             let mut obj = MaybeUninit::uninit();
             let res =
@@ -461,11 +480,11 @@ impl<T: Object> List<T> {
     }
 
     pub fn set(&mut self, idx: u16, obj: T) {
-        self.inner.set_obj(idx, obj)
+        self.inner.set(idx, obj)
     }
 
     pub fn get(&mut self, idx: u16) -> T {
-        self.inner.get_obj(idx).unwrap()
+        self.inner.get(idx).unwrap()
     }
 
     pub fn clear(&mut self) {
@@ -490,6 +509,16 @@ impl<T> Default for List<T> {
     }
 }
 
+impl<T: Object> FromIterator<T> for List<T> {
+    fn from_iter<U: IntoIterator<Item = T>>(iter: U) -> Self {
+        let mut list = List::default();
+        for item in iter {
+            list.push(item);
+        }
+        list
+    }
+}
+
 #[macro_export]
 macro_rules! list {
     () => { List::default() };
@@ -506,11 +535,105 @@ macro_rules! list {
 pub struct ProgressCallback(pub(crate) ComPtr<dyn IAIMPProgressCallback>);
 
 impl ProgressCallback {
-    pub fn progress(self, progress: f32) -> bool {
+    pub fn progress(&self, progress: f32) -> bool {
         unsafe {
             let mut canceled = MaybeUninit::uninit();
             self.0.process(progress, canceled.as_mut_ptr());
             canceled.assume_init()
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate as aimp;
+    use crate::test::TesterPlugin;
+
+    const STRING_DATA: &str = "This is a string data";
+
+    #[crate::test]
+    fn aimp_string_case() {
+        fn word_capital_word(word: &str) -> String {
+            let c = word.chars().next().unwrap();
+            word.replace(c, &c.to_uppercase().to_string())
+        }
+
+        let mut s = AimpString::from(STRING_DATA);
+        s.change_case(StringCase::Lower);
+        assert_eq!(s.to_string(), STRING_DATA.to_lowercase());
+        s.change_case(StringCase::FirstWordWithCapitalLetter);
+        assert_eq!(s.to_string().as_bytes()[0], STRING_DATA.as_bytes()[0]);
+        s.change_case(StringCase::AllWordsWithCapitalLetter);
+        assert_eq!(
+            s.to_string(),
+            STRING_DATA
+                .split(' ')
+                .map(word_capital_word)
+                .collect::<Vec<String>>()
+                .join(" ")
+        );
+        s.change_case(StringCase::Upper);
+        assert_eq!(s.to_string(), STRING_DATA.to_uppercase());
+    }
+
+    #[crate::test]
+    fn aimp_string_insert_str() {
+        let mut s = AimpString::from(STRING_DATA);
+        s.insert_str("This ".len(), "are strings");
+        assert!(s.to_string().starts_with("This are strings"))
+    }
+
+    #[crate::test]
+    fn aimp_string_eq() {
+        assert_eq!(AimpString::from(STRING_DATA).to_string(), STRING_DATA);
+    }
+
+    #[crate::test]
+    fn aimp_string_extend() {
+        let mut s = AimpString::default();
+        s.extend(vec!["A".into(), "B".into(), "C".into()]);
+        assert_eq!(s.to_string(), "ABC");
+    }
+
+    #[crate::test]
+    fn error_info() {
+        let content = ErrorInfoContent {
+            code: 123,
+            msg: AimpString::default(),
+            details: Some(AimpString::default()),
+        };
+        let mut info = ErrorInfo::default();
+        info.set(&content);
+        let returned_content = info.get();
+        assert_eq!(content, returned_content);
+        let _ = info.get_formatted();
+    }
+
+    #[crate::test]
+    fn object_list() {
+        let mut list = ObjectList::default();
+
+        assert!(list.is_empty());
+
+        list.push(AimpString::from(STRING_DATA));
+        list.push(AimpString::from("123"));
+
+        let a: AimpString = list.get(0).unwrap();
+        assert_eq!(a.to_string(), STRING_DATA);
+
+        assert!(!list.is_empty());
+        assert_eq!(list.len(), 2);
+
+        list.remove::<AimpString>(0);
+        let a: AimpString = list.get(0).unwrap();
+        assert_eq!(a.to_string(), "123");
+        assert!(!list.is_empty());
+        assert_eq!(list.len(), 1);
+
+        list.clear();
+        assert!(list.is_empty());
+    }
+
+    crate::main!(TesterPlugin);
 }

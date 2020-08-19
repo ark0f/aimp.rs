@@ -3,6 +3,7 @@ use parking_lot::{lock_api::RawMutex as _, Mutex, MutexGuard, RawMutex};
 use std::{
     cell::{Ref, RefCell, RefMut},
     ffi::{OsStr, OsString},
+    fmt,
     ops::{Deref, DerefMut},
     os::windows::ffi::OsStrExt,
     ptr,
@@ -50,6 +51,29 @@ impl ToWide for String {
     }
 }
 
+pub struct BoxedError(Box<dyn std::error::Error>);
+
+impl BoxedError {
+    pub fn new<T: std::error::Error + 'static>(err: T) -> Self {
+        Self(Box::new(err))
+    }
+}
+
+impl std::error::Error for BoxedError {}
+
+impl fmt::Debug for BoxedError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for BoxedError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+#[derive(Debug)]
 pub enum Service<T> {
     NoLock(RefCell<Option<T>>),
     Lock(Mutex<Option<T>>),
@@ -101,6 +125,7 @@ impl<T> Service<T> {
 unsafe impl<T> Send for Service<T> {}
 unsafe impl<T> Sync for Service<T> {}
 
+#[derive(Debug)]
 enum ServiceInit<'a, T> {
     NoLock(RefMut<'a, Option<T>>),
     Lock(MutexGuard<'a, Option<T>>),
@@ -135,6 +160,7 @@ impl<T> DerefMut for ServiceInit<'_, T> {
     }
 }
 
+#[derive(Debug)]
 pub enum ServiceRef<'a, T> {
     NoLock(Ref<'a, Option<T>>),
     Lock(MutexGuard<'a, Option<T>>),
@@ -152,6 +178,7 @@ impl<T> Deref for ServiceRef<'_, T> {
     }
 }
 
+#[derive(Debug)]
 pub enum ServiceMut<'a, T> {
     NoLock(RefMut<'a, Option<T>>),
     Lock(MutexGuard<'a, Option<T>>),

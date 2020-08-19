@@ -4,7 +4,7 @@ use std::mem::MaybeUninit;
 
 pub static CORE: Service<Core> = Service::without_lock();
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Core(ComPtr<dyn IAIMPCore>);
 
 impl Core {

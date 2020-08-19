@@ -8,7 +8,7 @@ use crate::{
     impl_prop_accessor, prop_list,
     prop_list::{HashedPropertyList, PropertyList},
     stream::Stream,
-    util::Service,
+    util::{BoxedError, Service},
     AimpString, Error, List, ProgressCallback, Result, CORE,
 };
 use iaimp::{
@@ -32,11 +32,9 @@ use std::{
     ops::{Deref, DerefMut, Range},
     time::SystemTime,
 };
-use winapi::shared::minwindef::BOOL;
-use winapi::shared::winerror::E_UNEXPECTED;
 use winapi::shared::{
-    minwindef::TRUE,
-    winerror::{E_FAIL, E_NOTIMPL, HRESULT as WinHRESULT, S_OK},
+    minwindef::{BOOL, TRUE},
+    winerror::{E_FAIL, E_NOTIMPL, E_UNEXPECTED, HRESULT as WinHRESULT, S_OK},
 };
 
 pub static FILE_FORMATS: Service<FileFormats> = Service::new();
@@ -104,11 +102,11 @@ impl FileInfo {
         FILE_INFO_SERVICE.get().file_info_from_url(file_uri.into())
     }
 
-    pub fn from_stream<T: ComInterface + IAIMPStream + ?Sized>(stream: Stream<T>) -> Result<Self> {
+    pub fn from_stream<T: Into<Stream>>(stream: T) -> Result<Self> {
         let this = FileInfo::default();
         FILE_INFO_SERVICE
             .get()
-            .file_info_from_stream(stream, &this)?;
+            .file_info_from_stream(stream.into(), &this)?;
         Ok(this)
     }
 
@@ -363,7 +361,7 @@ impl VirtualFile {
         FILE_INFO_SERVICE.get().virtual_file(file_uri.into())
     }
 
-    pub fn create_stream(&self) -> Result<Stream<dyn IAIMPStream>> {
+    pub fn create_stream(&self) -> Result<Stream> {
         unsafe {
             let mut stream = MaybeUninit::uninit();
             (self.prop_list)
@@ -457,11 +455,7 @@ impl FileInfoService {
         }
     }
 
-    fn file_info_from_stream<T: ComInterface + IAIMPStream + ?Sized>(
-        &self,
-        stream: Stream<T>,
-        file_info: &FileInfo,
-    ) -> Result<()> {
+    fn file_info_from_stream(&self, stream: Stream, file_info: &FileInfo) -> Result<()> {
         unsafe {
             self.0
                 .get_file_info_from_stream(
@@ -583,7 +577,7 @@ impl FileStreamingService {
                     stream.as_mut_ptr(),
                 )
                 .into_result()?;
-            Ok(FileStream(Stream(stream.assume_init())))
+            Ok(FileStream(Stream(stream.assume_init().cast())))
         }
     }
 
@@ -603,7 +597,7 @@ impl FileStreamingService {
                 .into_result()?;
             Ok((
                 virtual_file.assume_init().map(VirtualFile::from_com_rc),
-                FileStream(Stream(stream.assume_init())),
+                FileStream(Stream(stream.assume_init().cast())),
             ))
         }
     }
@@ -616,7 +610,7 @@ impl From<ComPtr<dyn IAIMPServiceFileStreaming>> for FileStreamingService {
 }
 
 #[derive(Debug)]
-pub struct FileStream(pub(crate) Stream<dyn IAIMPFileStream>);
+pub struct FileStream(pub(crate) Stream);
 
 impl FileStream {
     pub fn open<T: Into<AimpString>>(file_name: T) -> Result<Self> {
@@ -635,8 +629,8 @@ impl FileStream {
         unsafe {
             let mut offset = MaybeUninit::uninit();
             let mut size = MaybeUninit::uninit();
-            let res = self
-                .as_inner()
+            let res = (self.0)
+                .as_inner::<dyn IAIMPFileStream>()
                 .get_clipping(offset.as_mut_ptr(), size.as_mut_ptr());
             if res == E_FAIL {
                 None
@@ -652,7 +646,7 @@ impl FileStream {
     pub fn file_name(&self) -> AimpString {
         unsafe {
             let mut s = MaybeUninit::uninit();
-            self.as_inner()
+            self.as_inner::<dyn IAIMPFileStream>()
                 .get_file_name(s.as_mut_ptr())
                 .into_result()
                 .unwrap();
@@ -668,7 +662,7 @@ impl From<FileStream> for Stream {
 }
 
 impl Deref for FileStream {
-    type Target = Stream<dyn IAIMPFileStream>;
+    type Target = Stream;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -678,6 +672,12 @@ impl Deref for FileStream {
 impl DerefMut for FileStream {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+impl AsRef<Stream> for FileStream {
+    fn as_ref(&self) -> &Stream {
+        unsafe { &*(Deref::deref(self) as *const Stream) }
     }
 }
 
@@ -749,13 +749,8 @@ impl From<Range<i64>> for FileClipping {
 pub struct FileUri(pub(crate) AimpString);
 
 impl FileUri {
-    pub fn new<T: Into<AimpString>>(uri: T) -> Option<Self> {
-        let uri = uri.into();
-        if FILE_URI_SERVICE.get().is_url(&uri) {
-            Some(Self(uri))
-        } else {
-            None
-        }
+    pub fn is_url<T: AsRef<AimpString>>(s: T) -> bool {
+        FILE_URI_SERVICE.get().is_url(s.as_ref())
     }
 
     pub fn build<T: Into<AimpString>, U: Into<AimpString>>(container: T, part: U) -> Result<Self> {
@@ -815,6 +810,8 @@ impl fmt::Display for FileUri {
         fmt::Display::fmt(&self.0, f)
     }
 }
+
+impl_prop_accessor!(FileUri);
 
 pub(crate) struct FileUriService(ComPtr<dyn IAIMPServiceFileURI2>);
 
@@ -1367,28 +1364,6 @@ impl Extension for FileSystem {
     const SERVICE_IID: IID = <dyn IAIMPServiceFileSystems as ComInterface>::IID;
 }
 
-pub struct BoxedError(Box<dyn std::error::Error>);
-
-impl BoxedError {
-    fn new<T: std::error::Error + 'static>(err: T) -> Self {
-        Self(Box::new(err))
-    }
-}
-
-impl std::error::Error for BoxedError {}
-
-impl fmt::Debug for BoxedError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
-    }
-}
-
-impl fmt::Display for BoxedError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
 pub struct CommandWrapper<T>(T);
 
 pub trait CustomCommand {
@@ -1521,7 +1496,7 @@ where
         file_name: AimpString,
         flags: FileStreamingFlags,
         clipping: FileClipping,
-    ) -> Result<Stream<dyn IAIMPStream>, Self::Error> {
+    ) -> Result<Stream, Self::Error> {
         self.0
             .create_stream(file_name, flags, clipping)
             .map_err(BoxedError::new)
