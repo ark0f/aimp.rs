@@ -1,6 +1,5 @@
 use crate::{Error, Plugin, PluginCategory, PluginInfo};
-use std::cell::RefCell;
-use std::process::exit;
+use std::{cell::RefCell, process::exit};
 use tester::TestDescAndFn;
 
 #[doc(hidden)]
