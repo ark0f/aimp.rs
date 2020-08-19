@@ -29,7 +29,7 @@ use winapi::{
         winnt::{PWCHAR, WCHAR},
         winuser::*,
     },
-}; // keys
+};
 
 // COM code based on https://github.com/microsoft/com-rs
 
@@ -1265,7 +1265,6 @@ com_trait! {
 }
 
 #[repr(i32)]
-#[non_exhaustive]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum StreamSeekFrom {
     Beginning = 0,
