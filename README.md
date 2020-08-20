@@ -62,9 +62,6 @@ And then:
 cargo aimp --features testing
 ```
 
-Tests defined with `#[test]` will not be run 
-because custom test runners are unstable
-
 # License
 aimp.rs under either of:
 
