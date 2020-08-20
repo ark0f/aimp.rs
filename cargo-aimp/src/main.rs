@@ -43,6 +43,8 @@ enum Error {
     InvalidColorOption,
     #[error("Build failed")]
     BuildFailed,
+    #[error("--package and --example flags are not allowed at the same time")]
+    PackageAndExample,
     #[error("Failed to create toolhelp snapshot: {0}")]
     ToolhelpSnapshot(io::Error),
     #[error("Process32First failed: {0}")]
@@ -83,11 +85,13 @@ impl FromStr for Color {
 }
 
 #[derive(Debug, StructOpt)]
-/// Builds DLL, pack into zip archive and run AIMP with attached console
+/// Builds, installs plugin and runs AIMP with attached console
 struct Args {
     subcommand: String,
     #[structopt(long = "package")]
     package: Option<String>,
+    #[structopt(long = "example")]
+    example: Option<String>,
     #[structopt(long = "no-run")]
     /// Don't kill and don't run AIMP
     no_run: bool,
@@ -123,25 +127,36 @@ fn default_langs() -> PathBuf {
     PathBuf::from("langs")
 }
 
-fn get_package_name(package_flag: Option<String>) -> Result<String> {
+fn get_crate_name(package_flag: Option<&str>) -> Result<String> {
     let metadata = MetadataCommand::new().no_deps().exec()?;
-    let package = metadata
-        .packages
-        .into_iter()
-        .find(|package| {
-            Some(&package.name) == package_flag.as_ref() || {
+    let package = match package_flag {
+        Some(package) => metadata
+            .packages
+            .into_iter()
+            .flat_map(|package| package.targets)
+            .find(|target| target.name == package)
+            .map(|target| target.name),
+        None => metadata
+            .packages
+            .into_iter()
+            .find(|package| {
                 let mut path = PathBuf::from(&package.manifest_path);
                 path.pop();
                 path == env::current_dir().unwrap()
-            }
-        })
-        .map(|package| package.name)
-        .unwrap();
-    Ok(package)
+            })
+            .map(|package| package.name),
+    };
+    Ok(package.unwrap())
+}
+
+#[derive(Debug)]
+enum CrateKind {
+    Package(String),
+    Example(String),
 }
 
 fn cargo_build(
-    package: &str,
+    crate_kind: CrateKind,
     release: bool,
     features: Vec<String>,
     color: Color,
@@ -151,12 +166,14 @@ fn cargo_build(
     cmd.args(&[
         "build",
         "--message-format=json",
-        "--package",
-        package,
         "--color",
         &color.to_string(),
     ])
     .stdout(Stdio::piped());
+    match crate_kind {
+        CrateKind::Package(package) => cmd.args(&["--package", &package]),
+        CrateKind::Example(example) => cmd.args(&["--example", &example]),
+    };
     if release {
         cmd.arg("--release");
     }
@@ -172,25 +189,23 @@ fn cargo_build(
 }
 
 fn get_package_artifact(package: String, mut child: Child) -> Result<Option<Artifact>> {
-    let package_pattern = package + " ";
     let reader = BufReader::new(child.stdout.take().unwrap());
-    let artifact = Message::parse_stream(reader).into_iter().find_map(|msg| {
-        msg.map(|msg| match msg {
-            Message::CompilerArtifact(artifact)
-                if artifact.package_id.repr.starts_with(&package_pattern)
-                    && artifact.target.src_path.ends_with("lib.rs") =>
-            {
-                Some(artifact)
-            }
-            Message::CompilerMessage(msg) => {
-                println!("{}", msg);
-                None
-            }
-            _ => None,
+    let artifact = Message::parse_stream(reader)
+        .into_iter()
+        .find_map(|msg| {
+            msg.map(|msg| match msg {
+                Message::CompilerArtifact(artifact) if artifact.target.name == package => {
+                    Some(artifact)
+                }
+                Message::CompilerMessage(msg) => {
+                    println!("{}", msg);
+                    None
+                }
+                _ => None,
+            })
+            .transpose()
         })
-        .ok()
-        .flatten()
-    });
+        .transpose()?;
     Ok(artifact)
 }
 
@@ -301,7 +316,7 @@ unsafe fn find_aimp() -> Result<Option<DWORD>> {
     Ok(process)
 }
 
-unsafe fn kill_aimp(process: DWORD) -> Result<()> {
+unsafe fn kill_process(process: DWORD) -> Result<()> {
     let process = OpenProcess(PROCESS_TERMINATE, FALSE, process);
     if process == INVALID_HANDLE_VALUE {
         Err(io::Error::last_os_error()).map_err(Error::OpenProcess)?;
@@ -325,9 +340,16 @@ fn main() -> Result<()> {
     let aimp_root_dir = env::var("CARGO_AIMP_PLAYER_ROOT_DIR")
         .map_or_else(|_| PathBuf::from(AIMP_ROOT_DIR), PathBuf::from);
 
-    let package = get_package_name(args.package)?;
+    let krate = args.package.as_deref().or(args.example.as_deref());
+    let package = get_crate_name(krate)?;
+    let crate_kind = match (args.package.is_some(), args.example.is_some()) {
+        (true, false) => CrateKind::Package(package.clone()),
+        (false, true) => CrateKind::Example(package.clone()),
+        (false, false) => CrateKind::Package(package.clone()),
+        (true, true) => Err(Error::PackageAndExample)?,
+    };
     let child = cargo_build(
-        &package,
+        crate_kind,
         args.release,
         args.features,
         args.color,
@@ -359,7 +381,9 @@ fn main() -> Result<()> {
         pack(fs, &package, dll, &toml)?;
     } else if !args.no_run {
         unsafe {
-            find_aimp()?.map(|process| kill_aimp(process)).transpose()?;
+            find_aimp()?
+                .map(|process| kill_process(process))
+                .transpose()?;
         }
 
         let plugins_dir = aimp_root_dir.join("Plugins");
