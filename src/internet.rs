@@ -1,4 +1,4 @@
-pub use iaimp::ConnectionType;
+pub use iaimp::{ConnectionType, HttpClientPriorityFlags};
 
 use crate::{
     error::HresultExt,
@@ -16,9 +16,9 @@ use http::{
 };
 use iaimp::{
     com_wrapper, ComInterfaceQuerier, ComPtr, ComRc, ConnectionSettingsProp, ConnectionTypeWrapper,
-    HttpClientFlags, HttpClientPriorityFlags, HttpClientRestFlags, HttpMethod, IAIMPErrorInfo,
-    IAIMPHTTPClientEvents, IAIMPHTTPClientEvents2, IAIMPPropertyList,
-    IAIMPServiceConnectionSettings, IAIMPServiceHTTPClient2, IAIMPStream, IAIMPString,
+    HttpClientFlags, HttpClientRestFlags, HttpMethod, IAIMPErrorInfo, IAIMPHTTPClientEvents,
+    IAIMPHTTPClientEvents2, IAIMPPropertyList, IAIMPServiceConnectionSettings,
+    IAIMPServiceHTTPClient2, IAIMPStream, IAIMPString,
 };
 use std::{
     convert::TryFrom,
@@ -184,7 +184,7 @@ where
         }
     }
 
-    pub fn inner_send(mut self, flags: HttpClientRestFlags) -> Result<HttpTask> {
+    fn inner_send(mut self, flags: HttpClientRestFlags) -> Result<HttpTask> {
         let uri_and_headers = self.make_uri_and_headers()?.0;
         let method = self.match_method()?;
         let flags = HttpClientFlags::new(HttpClientRestFlags::UTF8 | flags, self.priority);

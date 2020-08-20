@@ -99,7 +99,11 @@ pub struct MemoryStream(pub(crate) Stream);
 
 impl Default for MemoryStream {
     fn default() -> Self {
-        Self(Stream(CORE.get().create().unwrap()))
+        unsafe {
+            Self(Stream(
+                CORE.get().create::<dyn IAIMPMemoryStream>().unwrap().cast(),
+            ))
+        }
     }
 }
 
