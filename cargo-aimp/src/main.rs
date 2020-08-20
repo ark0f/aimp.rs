@@ -191,7 +191,6 @@ fn cargo_build(
 fn get_package_artifact(package: String, mut child: Child) -> Result<Option<Artifact>> {
     let reader = BufReader::new(child.stdout.take().unwrap());
     let artifact = Message::parse_stream(reader)
-        .into_iter()
         .find_map(|msg| {
             msg.map(|msg| match msg {
                 Message::CompilerArtifact(artifact) if artifact.target.name == package => {
@@ -340,13 +339,13 @@ fn main() -> Result<()> {
     let aimp_root_dir = env::var("CARGO_AIMP_PLAYER_ROOT_DIR")
         .map_or_else(|_| PathBuf::from(AIMP_ROOT_DIR), PathBuf::from);
 
-    let krate = args.package.as_deref().or(args.example.as_deref());
+    let krate = args.package.as_deref().or_else(|| args.example.as_deref());
     let package = get_crate_name(krate)?;
     let crate_kind = match (args.package.is_some(), args.example.is_some()) {
         (true, false) => CrateKind::Package(package.clone()),
         (false, true) => CrateKind::Example(package.clone()),
         (false, false) => CrateKind::Package(package.clone()),
-        (true, true) => Err(Error::PackageAndExample)?,
+        (true, true) => return Err(Error::PackageAndExample.into()),
     };
     let child = cargo_build(
         crate_kind,
@@ -363,7 +362,7 @@ fn main() -> Result<()> {
         .into_iter()
         .any(|kind| kind == "cdylib")
     {
-        Err(Error::InvalidCrateType)?;
+        return Err(Error::InvalidCrateType.into());
     }
 
     let dll = artifact
