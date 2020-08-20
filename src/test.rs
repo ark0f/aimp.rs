@@ -21,7 +21,7 @@ impl Plugin for TesterPlugin {
 
     fn new() -> Result<Self, Self::Error> {
         TEST_FNS.with(|fns| {
-            let fns = fns.borrow_mut().take().unwrap();
+            let fns = fns.borrow_mut().take().unwrap_or_default();
             tester::test_main(&[], fns, None);
         });
         exit(0)
