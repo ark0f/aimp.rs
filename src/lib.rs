@@ -43,25 +43,27 @@ use winapi::shared::winerror::E_NOINTERFACE;
 pub mod macro_export {
     pub use crate::{plugin::PluginWrapper, util::message_box};
     pub use aimp_derive::test_fns;
-    pub use iaimp::{com_wrapper, ComRc, ComWrapper, IAIMPPlugin, IUnknown};
+    pub use iaimp;
     pub use tester;
     pub use winapi::shared::winerror::{HRESULT, S_OK};
 }
 
+/// Declare AIMP plugin entry point and create plugin inside
+/// Also installs panic hook to display panic by message box
 #[macro_export]
 macro_rules! main {
     ($entry:ident) => {
         #[no_mangle]
         pub unsafe extern "stdcall" fn AIMPPluginGetHeader(
-            header: *mut $crate::macro_export::ComRc<dyn $crate::macro_export::IAIMPPlugin>,
+            header: *mut $crate::macro_export::iaimp::ComRc<dyn $crate::macro_export::iaimp::IAIMPPlugin>,
         ) -> $crate::macro_export::HRESULT {
             type Wrapper = $crate::macro_export::PluginWrapper::<$entry>;
 
             $crate::main!(@test $entry);
 
             let wrapper =
-                $crate::macro_export::com_wrapper!(
-                    Wrapper::new() => dyn $crate::macro_export::IAIMPPlugin
+                $crate::macro_export::iaimp::com_wrapper!(
+                    Wrapper::new() => dyn $crate::macro_export::iaimp::IAIMPPlugin
                 )
                 .into_com_rc();
             header.write(wrapper);

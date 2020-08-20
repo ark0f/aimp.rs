@@ -11,6 +11,10 @@ members = [
     "aimp-derive",
 ]
 
+[[example]]
+name = "simple"
+crate-type = ["cdylib"]
+
 [lib]
 crate-type = ["cdylib", "lib"]
 
