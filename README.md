@@ -31,6 +31,40 @@ For more information about cargo-aimp run it with `--help` flag
 See [examples](examples) and
 * [aimp-openmpt](https://github.com/ark0f/aimp-openmpt)
 
+## Tests
+To test inside AIMP:
+```rust
+use aimp::AimpString;
+#[cfg(feature = "testing")]
+use aimp::test::TesterPlugin;
+
+#[aimp::test]
+fn some_test() {
+    let s = AimpString::from("123");
+    assert_eq!(s.to_string(), "123");
+}
+
+#[cfg(not(feature = "testing"))]
+aimp::main!(YourPlugin);
+
+#[cfg(feature = "testing")]
+aimp::main!(TesterPlugin);
+``` 
+
+`Cargo.toml`:
+```toml
+[features]
+testing = []
+```
+
+And then:
+```
+cargo aimp --features testing
+```
+
+Tests defined with `#[test]` will not be run 
+because custom test runners are unstable
+
 # License
 aimp.rs under either of:
 
